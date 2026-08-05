@@ -1,0 +1,8 @@
+**/node_modules
+**/dist
+**/.vite
+**/*.log
+server/data
+server/uploads
+.git
+.env

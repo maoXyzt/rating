@@ -1,0 +1,27 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      DB_PATH: /app/data/image-rating.sqlite
+      UPLOAD_DIR: /app/uploads
+    volumes:
+      - sqlite_data:/app/data
+      - image_uploads:/app/uploads
+
+  web:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
+volumes:
+  sqlite_data:
+  image_uploads:
