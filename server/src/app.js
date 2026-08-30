@@ -2623,9 +2623,13 @@ function invalidateTaskSummaryCaches(projectId) {
 }
 
 const queuedProjectTaskSummaries = new Set();
+const dirtyProjectTaskSummaries = new Set();
 
 function queueProjectTaskSummary(projectId) {
-  if (queuedProjectTaskSummaries.has(projectId)) return;
+  if (queuedProjectTaskSummaries.has(projectId)) {
+    dirtyProjectTaskSummaries.add(projectId);
+    return;
+  }
   queuedProjectTaskSummaries.add(projectId);
   setImmediate(() => {
     try {
@@ -2642,6 +2646,9 @@ function queueProjectTaskSummary(projectId) {
       console.error("failed to update project task summary", error);
     } finally {
       queuedProjectTaskSummaries.delete(projectId);
+      if (dirtyProjectTaskSummaries.delete(projectId)) {
+        queueProjectTaskSummary(projectId);
+      }
     }
   });
 }
