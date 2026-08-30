@@ -2622,6 +2622,24 @@ function invalidateTaskSummaryCaches(projectId) {
   subjectTaskReportCache.delete(projectId);
 }
 
+function queueProjectTaskSummary(projectId) {
+  setImmediate(() => {
+    try {
+      const taskStats = getProjectTaskStats(projectId);
+      if (taskStats.pending + taskStats.assigned !== 0) return;
+      updateSubjectTaskStatusStmt.run({
+        id: projectId,
+        taskStatus: "task_completed",
+        updatedAt: nowIso(),
+      });
+    } catch (error) {
+      // ponytail: eventual-consistency summary update; use a durable job if
+      // recovery after process loss becomes a requirement.
+      console.error("failed to update project task summary", error);
+    }
+  });
+}
+
 function projectStatsByIds(projectIds, version = taskVersion) {
   const ids = [...new Set(projectIds.filter(Boolean))];
   if (!ids.length) return new Map();
@@ -5025,24 +5043,8 @@ function completeAssignedTask(taskId, body = {}) {
     throw error;
   }
 
-  // Keep the write transaction limited to the task transition; summary work
-  // must not make other scorers wait on the SQLite writer lock.
-  try {
-    const taskStats = getProjectTaskStats(projectId);
-    if (taskStats.pending + taskStats.assigned === 0) {
-      updateSubjectTaskStatusStmt.run({
-        id: projectId,
-        taskStatus: "task_completed",
-        updatedAt: completedAt,
-      });
-    }
-  } catch (error) {
-    // The task is already committed; best-effort summary work must not turn a
-    // successful submission into a retryable 500 response.
-    console.error("failed to update project task summary", error);
-  }
-
   invalidateTaskSummaryCaches(projectId);
+  queueProjectTaskSummary(projectId);
   const updated = selectTaskByIdStmt.get(task.id);
   return hydrateTaskRows([updated])[0];
 }
