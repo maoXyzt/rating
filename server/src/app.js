@@ -4782,11 +4782,6 @@ function buildScorerTaskFilter(query = {}) {
   return { where: `WHERE ${clauses.join(" AND ")}`, params };
 }
 
-function getScorerTaskOptions(query = {}) {
-  scorerTaskScope(query);
-  return {};
-}
-
 function taskCriterionOrderSql(column) {
   const cases = taskCriteria
     .map((criterion, index) => {
@@ -4806,7 +4801,7 @@ function invalidateAssignedTaskListCache() {
 
 function invalidateScorerQueryCaches() {
   invalidateAssignedTaskListCache();
-  queryWorkerPool?.invalidate(["assignedTasks", "scorerDashboard"]);
+  queryWorkerPool?.invalidate(["assignedTasks", "assignedTaskOptions", "scorerDashboard"]);
 }
 
 function listAssignedTasks(query = {}) {
@@ -6254,7 +6249,9 @@ app.delete("/api/users/scorers/:id", async (req, res, next) => {
 
 app.get("/api/tasks/assigned/options", async (req, res, next) => {
   try {
-    res.json(getScorerTaskOptions({ ...req.query, scorer: req.auth.username }));
+    res.json(await getQueryWorkerPool().run("assignedTaskOptions", {
+      scorer: req.auth.username,
+    }));
   } catch (error) {
     next(error);
   }

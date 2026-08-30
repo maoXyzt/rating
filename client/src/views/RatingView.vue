@@ -7,7 +7,7 @@ import AsyncStatePlaceholder from '../components/AsyncStatePlaceholder.vue';
 import { taskCriteria } from '../constants/scoreCriteria';
 import { imageApi } from '../services/images';
 import { isQueryUnavailable } from '../services/http';
-import type { ProjectItem, RatingTask, ScorerDashboard, ScorerTaskListItem } from '../types/image';
+import type { RatingTask, ScorerDashboard, ScorerProjectOption, ScorerTaskListItem } from '../types/image';
 
 const message = useMessage();
 const tasks = ref<ScorerTaskListItem[]>([]);
@@ -22,7 +22,7 @@ const taskCursors = ref<Record<number, string | null>>({ 1: null });
 const activeTask = ref<RatingTask | null>(null);
 const rankingVisible = ref(false);
 const openingTaskId = ref<string | null>(null);
-const projects = ref<ProjectItem[]>([]);
+const projects = ref<ScorerProjectOption[]>([]);
 const taskStats = ref<Pick<ScorerDashboard, 'pendingTasks' | 'completedTasks' | 'totalTasks' | 'projectCount'>>({
   pendingTasks: 0,
   completedTasks: 0,
@@ -111,9 +111,10 @@ async function loadTasks(page = taskPage.value, pageSize = taskPageSize.value) {
 
 async function loadProjects() {
   try {
-    projects.value = await imageApi.projects();
+    const result = await imageApi.assignedTaskOptions();
+    projects.value = result.projects;
   } catch (error) {
-    message.error(errorMessage(error));
+    if (!isQueryUnavailable(error)) message.error(errorMessage(error));
   }
 }
 

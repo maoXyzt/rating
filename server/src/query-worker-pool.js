@@ -50,6 +50,7 @@ export function createQueryWorkerPool(options = {}) {
   const pending = new Map();
   const ttlByOperation = {
     assignedTasks: 1000,
+    assignedTaskOptions: 60000,
     scorerDashboard: 2000,
     ...(options.ttlByOperation || {}),
   };

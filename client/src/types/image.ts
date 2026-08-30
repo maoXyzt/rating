@@ -97,6 +97,11 @@ export interface ProjectItem {
   updatedAt: string;
 }
 
+export interface ScorerProjectOption {
+  _id: string;
+  name: string;
+}
+
 export interface ProjectPage {
   total: number;
   page: number;

@@ -403,6 +403,24 @@ function listAssignedTasks(query) {
   };
 }
 
+function assignedTaskOptions(query) {
+  const scorer = String(query.scorer || "").trim();
+  if (!scorer) throw queryError(400, "缺少打分人");
+  const user = db.prepare("SELECT 1 FROM users WHERE username = ? AND role = 'scorer' LIMIT 1").get(scorer);
+  if (!user) throw queryError(404, "打分账号不存在");
+  const rows = db.prepare(`
+    SELECT DISTINCT projects.id AS _id, projects.name, projects.createdAt
+    FROM rating_tasks
+    JOIN projects ON projects.id = rating_tasks.projectId
+    WHERE rating_tasks.taskVersion = ?
+      AND rating_tasks.scorer = ?
+      AND rating_tasks.status IN ('assigned', 'completed')
+      AND projects.deletionRequestedAt IS NULL
+    ORDER BY projects.createdAt DESC, projects.id ASC
+  `).all(taskVersion, scorer);
+  return { projects: rows.map(({ _id, name }) => ({ _id, name })) };
+}
+
 function scorerDashboard(query) {
   const scorer = String(query.scorer || "").trim();
   if (!scorer) throw queryError(400, "缺少打分人");
@@ -436,6 +454,7 @@ const operations = {
   feedbacks: listFeedbacks,
   images: listImages,
   assignedTasks: listAssignedTasks,
+  assignedTaskOptions,
   scorerDashboard,
 };
 

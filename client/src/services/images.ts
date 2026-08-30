@@ -1,4 +1,4 @@
-import type { AdminDashboard, AdminDashboardAverageDuration, AdminDashboardCharts, AdminDashboardProjectSection, AdminDashboardStats, AdminDashboardWorkloadSection, AdminTaskListItem, FeedbackPage, FeedbackStatus, FeedbackType, ImageItem, ImagePage, ImageQuery, ImageScore, ProjectItem, ProjectPage, RankingRelation, RatingTask, ScorerDashboard, ScorerTaskListItem, ScoringManagementSummary, ScoringRollbackJob, ScoringRollbackPreview, ScoringTaskRecordPage, SubjectItem, SubjectTaskReport, TaskListPage, TaskSubmissionMode, TaskSubmissionModeFilter } from '../types/image';
+import type { AdminDashboard, AdminDashboardAverageDuration, AdminDashboardCharts, AdminDashboardProjectSection, AdminDashboardStats, AdminDashboardWorkloadSection, AdminTaskListItem, FeedbackPage, FeedbackStatus, FeedbackType, ImageItem, ImagePage, ImageQuery, ImageScore, ProjectItem, ProjectPage, RankingRelation, RatingTask, ScorerDashboard, ScorerProjectOption, ScorerTaskListItem, ScoringManagementSummary, ScoringRollbackJob, ScoringRollbackPreview, ScoringTaskRecordPage, SubjectItem, SubjectTaskReport, TaskListPage, TaskSubmissionMode, TaskSubmissionModeFilter } from '../types/image';
 import { handleUnauthorized, requestJson, requestJsonWithRetry, requestResponse } from './http';
 
 function downloadFilename(contentDisposition: string | null, fallback: string) {
@@ -259,6 +259,7 @@ async function waitForImportJob(
 export const imageApi = {
   subjects: () => requestJson<SubjectItem[]>('/api/subjects'),
   projects: () => requestJson<ProjectItem[]>('/api/projects'),
+  assignedTaskOptions: () => requestJsonWithRetry<{ projects: ScorerProjectOption[] }>('/api/tasks/assigned/options'),
   projectPage(query: { page?: number; pageSize?: number } = {}) {
     const params = new URLSearchParams();
     if (query.page) params.set('page', String(query.page));
