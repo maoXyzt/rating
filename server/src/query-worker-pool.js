@@ -3,8 +3,9 @@ import { Worker } from "node:worker_threads";
 import { databasePath } from "./database-path.js";
 
 const WORKER_COUNT = 4;
-const MAX_QUEUE = WORKER_COUNT * 2;
+const MAX_QUEUE = 32;
 const QUERY_TIMEOUT_MS = 1000;
+const QUERY_DEADLINE_MS = 1500;
 
 export class QueryOverloadedError extends Error {
   status = 503;
@@ -22,6 +23,16 @@ export class QueryTimeoutError extends Error {
   retryAfterSeconds = 1;
 
   constructor(message = "查询耗时较长，请稍后重试") {
+    super(message);
+  }
+}
+
+export class QueryQueueTimeoutError extends Error {
+  status = 503;
+  code = "QUERY_QUEUE_TIMEOUT";
+  retryAfterSeconds = 1;
+
+  constructor(message = "查询等待时间过长，请稍后重试") {
     super(message);
   }
 }
@@ -122,19 +133,31 @@ export function createQueryWorkerPool(options = {}) {
   }
 
   function dispatch(slot, request) {
+    clearTimeout(request.queueTimer);
+    const remainingMs = request.deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      request.reject(new QueryQueueTimeoutError());
+      return;
+    }
     const requestId = crypto.randomUUID();
     slot.busy = true;
     slot.requestId = requestId;
-    const timer = setTimeout(() => timeout(slot, requestId), QUERY_TIMEOUT_MS);
+    const timer = setTimeout(() => timeout(slot, requestId), Math.min(QUERY_TIMEOUT_MS, remainingMs));
     pending.set(requestId, { ...request, timer });
     slot.worker.postMessage({ requestId, operation: request.operation, query: request.query });
   }
 
   function drain() {
-    workers.filter(Boolean).filter((slot) => !slot.busy && !slot.retiring).forEach((slot) => {
-      const request = queue.shift();
+    for (const slot of workers) {
+      if (!slot || slot.busy || slot.retiring) continue;
+      let request = queue.shift();
+      while (request && request.deadlineAt <= Date.now()) {
+        clearTimeout(request.queueTimer);
+        request.reject(new QueryQueueTimeoutError());
+        request = queue.shift();
+      }
       if (request) dispatch(slot, request);
-    });
+    }
   }
 
   function run(operation, query = {}) {
@@ -148,7 +171,21 @@ export function createQueryWorkerPool(options = {}) {
       return Promise.reject(new QueryOverloadedError());
     }
     const promise = new Promise((resolve, reject) => {
-      queue.push({ operation, query, resolve, reject, cacheEpoch });
+      const request = {
+        operation,
+        query,
+        resolve,
+        reject,
+        cacheEpoch,
+        deadlineAt: Date.now() + QUERY_DEADLINE_MS,
+      };
+      request.queueTimer = setTimeout(() => {
+        const index = queue.indexOf(request);
+        if (index < 0) return;
+        queue.splice(index, 1);
+        reject(new QueryQueueTimeoutError());
+      }, QUERY_DEADLINE_MS);
+      queue.push(request);
       drain();
     });
     inflight.set(key, promise);

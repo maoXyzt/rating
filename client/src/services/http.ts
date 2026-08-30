@@ -51,7 +51,7 @@ export async function readErrorMessage(response: Response) {
 
 export function isQueryUnavailable(error: unknown) {
   return error instanceof HttpError && error.status === 503 &&
-    ['QUERY_OVERLOADED', 'QUERY_TIMEOUT'].includes(error.code);
+    ['QUERY_OVERLOADED', 'QUERY_TIMEOUT', 'QUERY_QUEUE_TIMEOUT'].includes(error.code);
 }
 
 export async function requestResponse(url: string, init?: RequestInit): Promise<Response> {

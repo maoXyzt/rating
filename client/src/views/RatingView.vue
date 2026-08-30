@@ -259,7 +259,7 @@ watch(taskFilters, () => void loadTasks(1, taskPageSize.value), { deep: true });
 onMounted(() => {
   void loadProjects();
   void loadTasks();
-  void loadTaskStats();
+  window.setTimeout(() => void loadTaskStats(), 200);
 });
 </script>
 
