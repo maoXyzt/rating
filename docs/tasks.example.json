@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "overall-0001",
+      "criterion": "overall",
+      "images": [
+        {
+          "src_rel_path": "目录1/openfind__dc49770309__10）画面因颜值而产生内容美-9-10_2.webp"
+        },
+        { "src_rel_path": "目录1/openfind__dda6d20f6c__3）情绪与意境传达-5-6_14.webp" },
+        { "src_rel_path": "目录1/openfind__de9aba43fd__1）整体图片美感分数-5-6_12.png" },
+        {
+          "src_rel_path": "目录2/openfind__de88fb9c98__15【技术性】肢体正确性-1-2_3.jpg"
+        },
+        { "src_rel_path": "目录2/openfind__dfed143c0c__7）肖像-摄像真实感-9-10_5.png" }
+      ]
+    },
+    {
+      "id": "prompt-alignment-0001",
+      "criterion": "promptAlignment",
+      "images": [
+        "目录1/openfind__e3c4b2db7c__6）光照-光影-1-2_8.webp",
+        "目录1/openfind__e3d294de6f__6）光照-光影-3-4_7.webp",
+        "目录1/openfind__e4ad240aef__6）光照-光影-7-8_8.webp",
+        "目录2/openfind__e83b885f2f__3）情绪与意境传达-7-8_16.webp",
+        "目录2/openfind__e86ecbd21c__6）光照-光影-7-8_1.jpg"
+      ]
+    }
+  ]
+}

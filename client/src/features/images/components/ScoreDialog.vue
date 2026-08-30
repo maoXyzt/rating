@@ -112,7 +112,7 @@ const artisticRules: Rule[] = [
   },
   {
     key: 'lighting',
-    label: '光照与光影',
+    label: '光照/光影',
     tip: [
       '光影和谐美观性、光影为画面的加分度、明暗层级是否协调',
     ],
@@ -136,14 +136,6 @@ const artisticRules: Rule[] = [
   }
 ];
 
-const structureRules: Rule[] = [
-
-];
-
-const qualityRules: Rule[] = [
-
-];
-
 const technicalRules: Rule[] = [
   {
     key: 'promptAlignment',
@@ -154,14 +146,14 @@ const technicalRules: Rule[] = [
   },
   {
     key: 'textCorrectness',
-    label: '文字正确性',
+    label: '文字：正确性',
     canSkip: true,
     tip: ['画面里的文字是否正确、清晰、无错别字和乱码。'],
     examples: technicalExamples
   },
   {
     key: 'anatomyNormality',
-    label: '肢体正常性',
+    label: '肢体：正常性',
     canSkip: true,
     tip: ['人物或生物的手脚、关节、五官和身体比例是否自然。'],
     examples: technicalExamples
@@ -171,7 +163,7 @@ const technicalRules: Rule[] = [
 const infographicRules: Rule[] = [
   {
     key: 'informationClarity',
-    label: '信息传达明确度',
+    label: '信息传达是否突出/明确',
     canSkip: true,
     tip: ['信息层级是否清楚，重点是否突出，阅读路径是否明确。'],
     examples: infographicExamples
@@ -193,14 +185,12 @@ const infographicRules: Rule[] = [
 ];
 
 const sections = computed<Section[]>(() => [
-  { title: '艺术表达', rules: artisticRules },
-  // { title: '物理与感知结构（ISTA）', rules: structureRules },
-  // { title: '技术质量与细节（IQA）', rules: qualityRules },
-  { title: '技术维度', rules: technicalRules },
-  ...(isInfographic.value ? [{ title: '信息图类追加(非信息图则不评价)', rules: infographicRules }] : [])
+  { title: '艺术类', rules: artisticRules },
+  { title: '技术类', rules: technicalRules },
+  ...(isInfographic.value ? [{ title: '信息图类评分追加', rules: infographicRules }] : [])
 ]);
 
-const overallTip = ['独立一眼评估，不参考其它分项。'];
+const overallTip = ['一眼评，不参考下方分数。'];
 const discomfortTip = [
   '是否产生观感不舒适、恶心、厌恶、涉黄、暴力',
 ];
@@ -277,14 +267,14 @@ function close() {
   <n-modal :show="show" preset="dialog" class="score-dialog" title="图片评分" :show-icon="false" positive-text="保存评分"
     negative-text="取消" @positive-click="save" @negative-click="close" @update:show="emit('update:show', $event)">
     <div v-if="image" class="rating-body">
-      <n-image class="rating-image" :src="image.imageUrl" :preview-src="image.imageUrl" :alt="image.filename"
+      <n-image class="rating-image" :src="image.thumbnailUrl || image.imageUrl" :preview-src="image.imageUrl" :alt="image.filename"
         object-fit="contain" show-toolbar-tooltip />
       <n-scrollbar class="rating-form-scroll" :style="{ maxHeight: 'calc(100vh - 220px)' }">
         <n-form label-placement="top">
           <n-form-item>
             <template #label>
               <div class="rule-label-block">
-                <span class="rule-label-title">整体美感总分（独立一眼评）</span>
+                <span class="rule-label-title">整体美感总分（一眼评）</span>
                 <div class="rule-label-tip">
                   <div v-for="line in overallTip" :key="line">{{ line }}</div>
                 </div>
@@ -312,7 +302,7 @@ function close() {
                               xmlns="http://www.w3.org/2000/svg" p-id="1715" width="15" height="15">
                               <path
                                 d="M512 63.7C265.5 63.7 63.7 265.5 63.7 512S265.5 960.3 512 960.3 960.3 758.5 960.3 512 758.5 63.7 512 63.7m0 768.5c-35.3-0.1-64-28.7-64-64 0-35.2 28.8-64 64-64s64 28.8 64 64-28.8 64-64 64m83.3-483.5s0 3.2 0 0c0 3.2-54.5 256.1-54.5 256.1s3.2-19.2 0 0-12.8 28.8-28.8 28.8-25.6-12.8-28.8-32c-6.4-19.2-54.5-246.5-54.5-246.5 0-6.4-3.2-12.8-3.2-16 0-48 38.4-86.5 86.5-86.5s86.5 38.4 86.5 86.5c0 0-3.2 6.4-3.2 9.6"
-                                fill="#666666" p-id="1716"></path>
+                                fill="currentColor" p-id="1716"></path>
                             </svg>
                           </n-icon>
                         </button>
@@ -368,7 +358,7 @@ function close() {
           <n-form-item>
             <template #label>
               <div class="rule-label-block">
-                <span class="rule-label-title">不舒适与结构异常（一票否决：是 / 否）</span>
+                <span class="rule-label-title">不舒适（是 / 否）</span>
                 <div class="rule-label-tip">
                   <div v-for="line in discomfortTip" :key="line">{{ line }}</div>
                 </div>

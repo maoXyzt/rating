@@ -50,7 +50,8 @@ cd image-rating-platform
 首次启动：
 
 ```bash
-docker compose up --build -d
+# 默认使用 8080；如果外部访问端口是 8001：
+WEB_PORT=8001 docker compose up --build -d
 ```
 
 查看容器状态：
@@ -115,12 +116,16 @@ Compose 会根据项目目录名给 volume 加前缀，例如 `image-rating-plat
 
 ## 6. 备份数据
 
+SQLite 处于 WAL 模式。备份数据库前先停止 API，保证数据库文件和 WAL 状态一致；图片 volume 可以在 API 停止期间一并备份。
+
 在项目根目录执行：
 
 ```bash
 mkdir -p backups
+docker compose stop api
 docker run --rm -v image-rating-platform_sqlite_data:/data -v "$PWD/backups:/backup" alpine tar czf /backup/sqlite_data_$(date +%Y%m%d_%H%M%S).tgz -C /data .
 docker run --rm -v image-rating-platform_image_uploads:/data -v "$PWD/backups:/backup" alpine tar czf /backup/image_uploads_$(date +%Y%m%d_%H%M%S).tgz -C /data .
+docker compose start api
 ```
 
 如果你的 volume 前缀不同，把命令里的 `image-rating-platform_sqlite_data` 和 `image-rating-platform_image_uploads` 替换成 `docker volume ls` 看到的实际名称。
@@ -195,6 +200,18 @@ UPLOAD_DIR: /app/uploads
 ```
 
 通常不需要修改。只有在你要改变容器内部存储路径或端口时才需要调整。
+
+可选的安全和上传限制配置：
+
+```yaml
+COOKIE_SECURE: "true" # 通过 HTTPS 域名访问时开启
+MAX_ZIP_BYTES: 1073741824
+MAX_ARCHIVE_ENTRIES: 50000
+MAX_ARCHIVE_UNCOMPRESSED_BYTES: 21474836480
+MAX_IMAGE_UNCOMPRESSED_BYTES: 134217728
+```
+
+启用 `COOKIE_SECURE` 后，请确保浏览器始终通过 HTTPS 访问站点，否则登录 Cookie 不会被发送。
 
 ## 10. 常见问题
 

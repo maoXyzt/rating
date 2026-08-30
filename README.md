@@ -10,10 +10,10 @@ docker compose up --build -d
 
 ## 使用流程
 
-1. 在“管理”页上传 ZIP。每个 ZIP 会创建一个独立的“主体”。
-2. 管理页的图包列表中点击“查看图片”，进入图包明细表；可按目录分类筛选，也可以多选评分标准，为每个标准设置 1–10 分范围后应用筛选。
-3. 回到“打分”页，在右上角选择 ZIP 主体；左侧按该主体的目录和评分状态筛选，右侧显示对应图片。
-4. 点击图片评分，结果会直接写回这条图片记录。
+1. 使用管理员账号登录后，在“项目管理”上传 ZIP。每个 ZIP 会创建一个独立项目。
+2. ZIP 处理完成后，在项目任务页面按轮次生成并分配排序任务。
+3. 打分账号登录后，在“任务列表”领取分配给自己的五图排序任务并提交。
+4. 已完成任务保存打分人、完成时间、用时、排序结果、并列关系和不适用图片；修改任务不会覆盖初次完成时间和用时。
 
 SQLite 数据文件默认位于 `server/data/image-rating.sqlite`，Docker 下会挂载到 `/app/data/image-rating.sqlite`。开发时不需要单独启动数据库。
 
@@ -21,12 +21,10 @@ ZIP 内目录示例：
 
 ```text
 本次数据.zip
-├─ 艺术类/
-│  ├─ 人物/
-│  │  └─ a.png
-│  └─ b.jpg
-└─ 信息图类/
-   └─ c.webp
+├─ sample_000001.png
+├─ 信息图/
+│  └─ sample_000002.png
+└─ manifest.json
 ```
 
-上例的分类分别为 `艺术类/人物`、`艺术类`、`信息图类`。支持 jpg、jpeg、png、webp、gif。开发时先分别在 `server`、`client` 运行 `npm install`，再执行根目录的 `npm run dev`。
+`信息图/` 下的图片会追加信息图专属维度，其他图片按通用维度创建任务。`manifest.json` 为可选文件，服务端以压缩包内图片文件名匹配其中的 `dest_rel_path` / `image_filename` 并保存 prompt 和图片详情；缺少 manifest 不会导致导入失败。支持 jpg、jpeg、png、webp、gif。开发时先分别在 `server`、`client` 运行 `npm install`，再执行根目录的 `npm run dev`。

@@ -55,7 +55,7 @@ export function openScorerPrompt() {
 
 export function requestScorerName() {
   if (scorerName.value) return Promise.resolve(scorerName.value);
-  return openScorerPrompt();
+  return Promise.resolve(null);
 }
 
 export function submitScorerName() {

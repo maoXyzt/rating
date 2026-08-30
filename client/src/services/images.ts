@@ -1,33 +1,65 @@
-import type { ImageItem, ImagePage, ImageQuery, ImageScore, SubjectItem } from '../types/image';
+import type { AdminDashboard, AdminDashboardCharts, AdminDashboardProjectSection, AdminDashboardStats, AdminDashboardWorkloadSection, AdminTaskListItem, FeedbackPage, FeedbackStatus, FeedbackType, ImageItem, ImagePage, ImageQuery, ImageScore, ProjectItem, ProjectPage, RankingRelation, RatingTask, ScorerDashboard, ScorerTaskListItem, ScoringManagementSummary, ScoringRollbackJob, ScoringRollbackPreview, ScoringTaskRecordPage, SubjectItem, SubjectTaskReport, TaskListPage, TaskSubmissionMode, TaskSubmissionModeFilter } from '../types/image';
+import { handleUnauthorized, requestJson, requestResponse } from './http';
 
-async function readErrorMessage(response: Response) {
-  const text = await response.text().catch(() => '');
-  if (!text) return '请求失败';
-  try {
-    const body = JSON.parse(text) as { message?: string };
-    return body.message || text;
-  } catch {
-    return text;
-  }
+function downloadFilename(contentDisposition: string | null, fallback: string) {
+  const match = contentDisposition?.match(/filename="?([^";]+)"?/i);
+  return match?.[1] || fallback;
 }
 
-async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
-  if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
-  }
-  const text = await response.text();
-  return (text ? JSON.parse(text) : undefined) as T;
-}
+const ZIP_CHUNK_SIZE = 12 * 1024 * 1024;
+const ZIP_CHUNK_RETRY_COUNT = 3;
+const IMPORT_STATUS_POLL_INTERVAL = 800;
+const RESUMABLE_UPLOAD_STORAGE_PREFIX = 'resumable-zip-upload:';
+const TUS_VERSION = '1.0.0';
 
-async function requestEmpty(url: string, init?: RequestInit): Promise<void> {
-  const response = await fetch(url, init);
-  if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
-  }
-}
+type ImportJob = {
+  uploadId: string;
+  status: 'queued' | 'merging' | 'importing' | 'completed' | 'failed';
+  stage: string;
+  progress: number;
+  message: string | null;
+  result?: { subject: SubjectItem; imported: number; skipped: number; batch: string };
+};
 
-const ZIP_CHUNK_SIZE = 8 * 1024 * 1024;
+type ResumableUploadSession = {
+  uploadId: string;
+  uploadUrl: string;
+  originalFilename: string;
+  uploadLength: number;
+  offset: number;
+  expiresAt: string;
+};
+
+type ResumableUploadProbe = {
+  status: 'uploading' | 'processing' | 'missing';
+  offset: number;
+  uploadLength: number;
+};
+
+export type TaskAllocationImportResult = {
+  filename: string;
+  hasHeader: boolean;
+  scorerColumn: number;
+  countColumn: number;
+  rows: Array<{ rowNumber: number; scorer: string; taskCount: number }>;
+  errors: string[];
+};
+
+type TaskCompletionPayload = {
+  scorer: string;
+  projectId?: string | null;
+  ranking: string[];
+  rankingRelations?: RankingRelation[];
+  excludedImageIds?: string[];
+  correctImageIds?: string[];
+  submissionMode?: TaskSubmissionMode;
+  rankingActionCount?: number;
+  durationMs: number;
+};
+
+function delay(milliseconds: number) {
+  return new Promise(resolve => window.setTimeout(resolve, milliseconds));
+}
 
 export function createUploadId() {
   const randomUUID = globalThis.crypto?.randomUUID?.();
@@ -37,37 +69,603 @@ export function createUploadId() {
   return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
 }
 
-async function uploadZipChunk(uploadId: string, index: number, chunk: Blob, onProgress?: (loaded: number, total: number) => void) {
-  const body = new FormData();
-  body.append('chunk', chunk, `chunk-${index}.part`);
-  await new Promise<void>((resolve, reject) => {
+function resumableStorageKey(file: File) {
+  return [
+    RESUMABLE_UPLOAD_STORAGE_PREFIX,
+    file.name,
+    file.size,
+    file.lastModified,
+    file.type || 'application/octet-stream'
+  ].join('|');
+}
+
+function encodeUploadMetadataValue(value: string) {
+  return btoa(unescape(encodeURIComponent(value)));
+}
+
+function decodeUploadMetadataValue(value: string) {
+  return decodeURIComponent(escape(atob(value)));
+}
+
+function getStoredResumableSession(file: File) {
+  const raw = window.localStorage.getItem(resumableStorageKey(file));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as ResumableUploadSession;
+    if (
+      !parsed ||
+      parsed.originalFilename !== file.name ||
+      parsed.uploadLength !== file.size ||
+      typeof parsed.uploadUrl !== 'string'
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function setStoredResumableSession(file: File, session: ResumableUploadSession) {
+  window.localStorage.setItem(resumableStorageKey(file), JSON.stringify(session));
+}
+
+function clearStoredResumableSession(file: File) {
+  window.localStorage.removeItem(resumableStorageKey(file));
+}
+
+function parseOffsetHeader(value: string | null) {
+  if (!value) return NaN;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : NaN;
+}
+
+async function createResumableSession(file: File): Promise<ResumableUploadSession> {
+  const response = await requestResponse('/api/import/uploads', {
+    method: 'POST',
+    headers: {
+      'Tus-Resumable': TUS_VERSION,
+      'Upload-Length': String(file.size),
+      'Upload-Metadata': `filename ${encodeUploadMetadataValue(file.name)}`
+    }
+  });
+
+  const body = await response.json().catch(() => null) as
+    | { uploadId?: string; uploadUrl?: string; originalFilename?: string; uploadLength?: number; offset?: number; expiresAt?: string }
+    | null;
+  const uploadUrl = body?.uploadUrl || response.headers.get('location') || '';
+  const uploadId = body?.uploadId || uploadUrl.split('/').filter(Boolean).pop() || '';
+  const originalFilename = body?.originalFilename || file.name;
+  const uploadLength = body?.uploadLength || file.size;
+  const offset = body?.offset ?? 0;
+  const expiresAt = body?.expiresAt || response.headers.get('upload-expires') || '';
+  if (!uploadUrl || !uploadId) throw new Error('无法创建可续传上传会话');
+
+  return { uploadId, uploadUrl, originalFilename, uploadLength, offset, expiresAt };
+}
+
+async function probeResumableSession(uploadUrl: string): Promise<ResumableUploadProbe> {
+  const response = await requestResponse(uploadUrl, {
+    method: 'HEAD',
+    headers: { 'Tus-Resumable': TUS_VERSION }
+  });
+
+  if (response.status === 404 || response.status === 410) {
+    return { status: 'missing', offset: 0, uploadLength: 0 };
+  }
+  if (response.status === 409) {
+    const offset = parseOffsetHeader(response.headers.get('upload-offset'));
+    const uploadLength = parseOffsetHeader(response.headers.get('upload-length'));
+    return {
+      status: 'processing',
+      offset: Number.isFinite(offset) ? offset : 0,
+      uploadLength: Number.isFinite(uploadLength) ? uploadLength : 0
+    };
+  }
+  const offset = parseOffsetHeader(response.headers.get('upload-offset'));
+  const uploadLength = parseOffsetHeader(response.headers.get('upload-length'));
+  return {
+    status: 'uploading',
+    offset: Number.isFinite(offset) ? offset : 0,
+    uploadLength: Number.isFinite(uploadLength) ? uploadLength : 0
+  };
+}
+
+async function patchResumableSession(
+  uploadUrl: string,
+  offset: number,
+  chunk: Blob,
+  onProgress?: (loaded: number, total: number) => void
+) {
+  return await new Promise<number>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/import/chunks/${uploadId}/parts/${index}`);
+    xhr.open('PATCH', uploadUrl);
+    xhr.timeout = 5 * 60 * 1000;
+    xhr.setRequestHeader('Tus-Resumable', TUS_VERSION);
+    xhr.setRequestHeader('Upload-Offset', String(offset));
+    xhr.setRequestHeader('Content-Type', 'application/offset+octet-stream');
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve();
+        const nextOffset = parseOffsetHeader(xhr.getResponseHeader('upload-offset'));
+        resolve(Number.isFinite(nextOffset) ? nextOffset : offset + chunk.size);
         return;
       }
-      const responseText = xhr.responseText || '';
-      try {
-        const body = JSON.parse(responseText) as { message?: string };
-        reject(new Error(body.message || responseText || `请求失败 (${xhr.status})`));
-      } catch {
-        reject(new Error(responseText || `请求失败 (${xhr.status})`));
+      if (xhr.status === 401) {
+        void handleUnauthorized();
       }
+      const error = new Error(`上传分片失败 (${xhr.status})`) as Error & { status?: number; serverOffset?: number };
+      error.status = xhr.status;
+      const serverOffset = parseOffsetHeader(xhr.getResponseHeader('upload-offset'));
+      if (Number.isFinite(serverOffset)) error.serverOffset = serverOffset;
+      reject(error);
     };
-    xhr.onerror = () => reject(new Error('请求失败'));
+    xhr.onerror = () => reject(new Error('网络连接中断，上传分片失败'));
+    xhr.ontimeout = () => reject(new Error('上传分片超时，请重试'));
     if (xhr.upload && onProgress) {
       xhr.upload.onprogress = event => {
         if (event.lengthComputable) onProgress(event.loaded, event.total);
       };
     }
-    xhr.send(body);
+    xhr.send(chunk);
   });
+}
+
+async function uploadResumableChunkWithRetry(
+  uploadUrl: string,
+  offset: number,
+  chunk: Blob,
+  onProgress?: (loaded: number, total: number) => void
+) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < ZIP_CHUNK_RETRY_COUNT; attempt++) {
+    try {
+      return await patchResumableSession(uploadUrl, offset, chunk, onProgress);
+    } catch (error) {
+      lastError = error;
+      const status = (error as Error & { status?: number }).status;
+      if (attempt + 1 < ZIP_CHUNK_RETRY_COUNT && (!status || status >= 500)) {
+        await delay(500 * (attempt + 1));
+        continue;
+      }
+      break;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('上传分片失败');
+}
+
+async function waitForImportJob(
+  uploadId: string,
+  initialJob: ImportJob,
+  onProcessing?: (job: ImportJob) => void
+) {
+  let job = initialJob;
+  while (job.status === 'queued' || job.status === 'merging' || job.status === 'importing') {
+    onProcessing?.(job);
+    await delay(IMPORT_STATUS_POLL_INTERVAL);
+    job = await requestJson<ImportJob>(
+      `/api/import/uploads/${encodeURIComponent(uploadId)}/status`
+    );
+  }
+  onProcessing?.(job);
+  if (job.status === 'failed') {
+    const error = new Error(job.message || '项目导入失败') as Error & { terminal?: boolean };
+    error.terminal = true;
+    throw error;
+  }
+  if (!job.result) throw new Error('导入任务未返回结果');
+  return job.result;
 }
 
 export const imageApi = {
   subjects: () => requestJson<SubjectItem[]>('/api/subjects'),
+  projects: () => requestJson<ProjectItem[]>('/api/projects'),
+  projectPage(query: { page?: number; pageSize?: number } = {}) {
+    const params = new URLSearchParams();
+    if (query.page) params.set('page', String(query.page));
+    if (query.pageSize) params.set('pageSize', String(query.pageSize));
+    return requestJson<ProjectPage>(`/api/projects${params.toString() ? `?${params}` : ''}`);
+  },
+  createProject(payload: { name: string; packageIds: string[] }) {
+    return requestJson<{ project: ProjectItem }>('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  },
+  updateProject(id: string, payload: { name: string; packageIds: string[] }) {
+    return requestJson<{ project: ProjectItem }>(`/api/projects/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  },
+  deleteProject(id: string) {
+    return requestJson<{ deleted: boolean }>(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  },
+  adminDashboard(query: { projectId?: string | null; scorerId?: string | null; teamId?: string | null; page?: number; pageSize?: number } = {}) {
+    const params = new URLSearchParams();
+    if (query.projectId) params.set('projectId', query.projectId);
+    if (query.scorerId) params.set('scorerId', query.scorerId);
+    if (query.teamId) params.set('teamId', query.teamId);
+    if (query.page) params.set('page', String(query.page));
+    if (query.pageSize) params.set('pageSize', String(query.pageSize));
+    return requestJson<AdminDashboard>(`/api/admin/dashboard${params.toString() ? `?${params}` : ''}`);
+  },
+  adminDashboardStats() {
+    return requestJson<AdminDashboardStats>('/api/admin/dashboard/stats');
+  },
+  adminDashboardProjectSection(query: { projectId?: string | null } = {}) {
+    const params = new URLSearchParams();
+    if (query.projectId) params.set('projectId', query.projectId);
+    return requestJson<AdminDashboardProjectSection>(`/api/admin/dashboard/project-summary${params.toString() ? `?${params}` : ''}`);
+  },
+  adminDashboardCharts() {
+    return requestJson<AdminDashboardCharts>('/api/admin/dashboard/charts');
+  },
+  adminDashboardWorkload(query: { scorerId?: string | null; teamId?: string | null } = {}) {
+    const params = new URLSearchParams();
+    if (query.scorerId) params.set('scorerId', query.scorerId);
+    if (query.teamId) params.set('teamId', query.teamId);
+    return requestJson<AdminDashboardWorkloadSection>(`/api/admin/dashboard/workload${params.toString() ? `?${params}` : ''}`);
+  },
+  adminScoringSummary(query: {
+    page?: number;
+    pageSize?: number;
+    scorer?: string | null;
+    projectId?: string | null;
+    submissionMode?: TaskSubmissionModeFilter | null;
+  } = {}) {
+    const params = new URLSearchParams();
+    if (query.page) params.set('page', String(query.page));
+    if (query.pageSize) params.set('pageSize', String(query.pageSize));
+    if (query.scorer) params.set('scorer', query.scorer);
+    if (query.projectId) params.set('projectId', query.projectId);
+    if (query.submissionMode) params.set('submissionMode', query.submissionMode);
+    return requestJson<ScoringManagementSummary>(`/api/admin/scoring/summary${params.toString() ? `?${params}` : ''}`);
+  },
+  adminScoringTasks(query: {
+    page?: number;
+    pageSize?: number;
+    scorer?: string | null;
+    projectId?: string | null;
+    submissionMode?: TaskSubmissionModeFilter | null;
+    minDurationSeconds?: number | null;
+    maxDurationSeconds?: number | null;
+  } = {}) {
+    const params = new URLSearchParams();
+    if (query.page) params.set('page', String(query.page));
+    if (query.pageSize) params.set('pageSize', String(query.pageSize));
+    if (query.scorer) params.set('scorer', query.scorer);
+    if (query.projectId) params.set('projectId', query.projectId);
+    if (query.submissionMode) params.set('submissionMode', query.submissionMode);
+    if (query.minDurationSeconds != null) params.set('minDurationSeconds', String(query.minDurationSeconds));
+    if (query.maxDurationSeconds != null) params.set('maxDurationSeconds', String(query.maxDurationSeconds));
+    return requestJson<ScoringTaskRecordPage>(`/api/admin/scoring/tasks${params.toString() ? `?${params}` : ''}`);
+  },
+  previewScoringRollback(payload: unknown) {
+    return requestJson<ScoringRollbackPreview>('/api/admin/scoring/rollback/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  },
+  rollbackScoringTasks(payload: { taskIds: string[] }) {
+    return requestJson<ScoringRollbackJob>('/api/admin/scoring/rollback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  },
+  scoringRollbackStatus(jobId: string) {
+    return requestJson<ScoringRollbackJob>(`/api/admin/scoring/rollback/${encodeURIComponent(jobId)}`);
+  },
+  async exportCompletedTasks(filters?: string | string[] | { projectIds?: string[] | null } | null) {
+    const params = new URLSearchParams();
+    if (Array.isArray(filters) && filters.length) {
+      params.set('projectIds', filters.join(','));
+    } else if (typeof filters === 'string' && filters) {
+      params.set('projectId', filters);
+    } else if (filters && typeof filters === 'object' && !Array.isArray(filters)) {
+      if (filters.projectIds?.length) params.set('projectIds', filters.projectIds.join(','));
+    }
+    const response = await requestResponse(`/api/admin/tasks/completed/export${params.toString() ? `?${params}` : ''}`);
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = downloadFilename(response.headers.get('content-disposition'), 'completed-tasks.json');
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  },
+  async exportTeamTaskSummary(teamIds: string[]) {
+    const params = new URLSearchParams();
+    if (teamIds.length) params.set('teamIds', teamIds.join(','));
+    const response = await requestResponse(`/api/admin/teams/task-summary/export${params.toString() ? `?${params}` : ''}`);
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = downloadFilename(response.headers.get('content-disposition'), 'team-task-summary.json');
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  },
+  async exportScorerTaskSummary(scorerIds: string[]) {
+    const params = new URLSearchParams();
+    if (scorerIds.length) params.set('scorerIds', scorerIds.join(','));
+    const response = await requestResponse(`/api/admin/scorers/completed/export${params.toString() ? `?${params}` : ''}`);
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = downloadFilename(response.headers.get('content-disposition'), 'scorer-completed-tasks.json');
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  },
+  taskReport(subjectId: string) {
+    return requestJson<SubjectTaskReport>(`/api/subjects/${encodeURIComponent(subjectId)}/tasks/report`);
+  },
+  projectTaskReport(projectId: string) {
+    return requestJson<SubjectTaskReport>(`/api/projects/${encodeURIComponent(projectId)}/tasks/report`);
+  },
+  async exportTaskReport(subjectId: string) {
+    const response = await requestResponse(`/api/subjects/${encodeURIComponent(subjectId)}/tasks/report/export`);
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = downloadFilename(response.headers.get('content-disposition'), 'task-report.xlsx');
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  },
+  async exportProjectTaskReport(projectId: string) {
+    const response = await requestResponse(`/api/projects/${encodeURIComponent(projectId)}/tasks/report/export`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = downloadFilename(response.headers.get('content-disposition'), 'task-report.xlsx');
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  },
+  tasks(subjectId: string, query: {
+    page?: number;
+    pageSize?: number;
+    status?: RatingTask['status'] | null;
+    scorer?: string | null;
+    criterion?: RatingTask['criterion'] | null;
+  } = {}) {
+    const params = new URLSearchParams();
+    if (query.page) params.set('page', String(query.page));
+    if (query.pageSize) params.set('pageSize', String(query.pageSize));
+    if (query.status) params.set('status', query.status);
+    if (query.scorer) params.set('scorer', query.scorer);
+    if (query.criterion) params.set('criterion', query.criterion);
+    return requestJson<{ subject: SubjectItem } & TaskListPage<AdminTaskListItem>>(
+      `/api/subjects/${encodeURIComponent(subjectId)}/tasks${params.toString() ? `?${params}` : ''}`
+    );
+  },
+  projectTasks(projectId: string, query: {
+    page?: number;
+    pageSize?: number;
+    status?: RatingTask['status'] | null;
+    scorer?: string | null;
+    criterion?: RatingTask['criterion'] | null;
+  } = {}) {
+    const params = new URLSearchParams();
+    if (query.page) params.set('page', String(query.page));
+    if (query.pageSize) params.set('pageSize', String(query.pageSize));
+    if (query.status) params.set('status', query.status);
+    if (query.scorer) params.set('scorer', query.scorer);
+    if (query.criterion) params.set('criterion', query.criterion);
+    return requestJson<{ subject: SubjectItem; project: ProjectItem } & TaskListPage<AdminTaskListItem>>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks${params.toString() ? `?${params}` : ''}`
+    );
+  },
+  adminTaskDetail(subjectId: string, taskId: string) {
+    return requestJson<{ task: RatingTask }>(
+      `/api/subjects/${encodeURIComponent(subjectId)}/tasks/${encodeURIComponent(taskId)}`
+    );
+  },
+  adminProjectTaskDetail(projectId: string, taskId: string) {
+    return requestJson<{ task: RatingTask }>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`
+    );
+  },
+  taskOptions(subjectId: string) {
+    return requestJson<{ scorers: string[] }>(
+      `/api/subjects/${encodeURIComponent(subjectId)}/tasks/options`
+    );
+  },
+  projectTaskOptions(projectId: string) {
+    return requestJson<{ scorers: string[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/options`
+    );
+  },
+  assignedTasks(query: {
+    scorer: string;
+    projectId?: string | null;
+    page?: number;
+    pageSize?: number;
+    status?: 'assigned' | 'completed' | null;
+    criterion?: RatingTask['criterion'] | null;
+  }) {
+    const params = new URLSearchParams();
+    params.set('scorer', query.scorer);
+    if (query.projectId) params.set('projectId', query.projectId);
+    if (query.page) params.set('page', String(query.page));
+    if (query.pageSize) params.set('pageSize', String(query.pageSize));
+    if (query.status) params.set('status', query.status);
+    if (query.criterion) params.set('criterion', query.criterion);
+    return requestJson<TaskListPage<ScorerTaskListItem>>(`/api/tasks/assigned?${params}`);
+  },
+  assignedTaskDetail(taskId: string) {
+    return requestJson<{ task: RatingTask }>(`/api/tasks/${encodeURIComponent(taskId)}`);
+  },
+  scorerDashboard(query: { scorer: string; projectId?: string | null }) {
+    const params = new URLSearchParams();
+    params.set('scorer', query.scorer);
+    if (query.projectId) params.set('projectId', query.projectId);
+    return requestJson<ScorerDashboard>(`/api/scorer/dashboard?${params}`);
+  },
+  feedbacks(query: { page?: number; pageSize?: number; status?: FeedbackStatus | null } = {}) {
+    const params = new URLSearchParams();
+    if (query.page) params.set('page', String(query.page));
+    if (query.pageSize) params.set('pageSize', String(query.pageSize));
+    if (query.status) params.set('status', query.status);
+    return requestJson<FeedbackPage>(`/api/feedbacks${params.toString() ? `?${params}` : ''}`);
+  },
+  submitFeedback(payload: { title: string; type: FeedbackType; description: string; images: File[] }) {
+    const body = new FormData();
+    body.append('title', payload.title);
+    body.append('type', payload.type);
+    body.append('description', payload.description);
+    payload.images.forEach(image => body.append('images', image, image.name));
+    return requestJson<{ feedback: import('../types/image').FeedbackItem }>('/api/feedbacks', {
+      method: 'POST',
+      body
+    });
+  },
+  replyFeedback(id: string, payload: { status: FeedbackStatus; reply: string }) {
+    return requestJson<{ feedback: import('../types/image').FeedbackItem }>(`/api/feedbacks/${encodeURIComponent(id)}/reply`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  },
+  replyFeedbackMessage(id: string, content: string) {
+    return requestJson<{ feedback: import('../types/image').FeedbackItem }>(`/api/feedbacks/${encodeURIComponent(id)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content })
+    });
+  },
+  setFeedbackStatus(id: string, status: FeedbackStatus) {
+    return requestJson<{ feedback: import('../types/image').FeedbackItem }>(`/api/feedbacks/${encodeURIComponent(id)}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status })
+    });
+  },
+  completeTask(taskId: string, payload: TaskCompletionPayload) {
+    return requestJson<{ task: RatingTask }>(`/api/tasks/${encodeURIComponent(taskId)}/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  },
+  updateCompletedTask(taskId: string, payload: TaskCompletionPayload) {
+    return requestJson<{ task: RatingTask }>(`/api/tasks/${encodeURIComponent(taskId)}/complete`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  },
+  generateProjectTasks(projectId: string, assignment: {
+    teamIds: string[];
+    teamMatchMode: 'all' | 'any';
+    allocations: Array<{ scorer: string; taskCount: number }>;
+  }) {
+    return requestJson<{
+      jobId: string;
+      subjectId: string;
+      projectId: string;
+      status: 'queued' | 'running' | 'completed' | 'failed';
+      stage: string;
+      progress: number;
+      message: string | null;
+      result?: { project: ProjectItem; taskCount: number; createdCount: number; assignedCount: number; unassignedCount: number; taskVersion: string };
+    }>(`/api/projects/${encodeURIComponent(projectId)}/tasks/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        teamIds: assignment.teamIds,
+        teamMatchMode: assignment.teamMatchMode,
+        allocations: assignment.allocations
+      })
+    });
+  },
+  projectTaskGenerationStatus(projectId: string, jobId: string) {
+    return requestJson<{
+      jobId: string;
+      subjectId: string;
+      projectId: string;
+      status: 'queued' | 'running' | 'completed' | 'failed';
+      stage: string;
+      progress: number;
+      message: string | null;
+      result?: { project: ProjectItem; taskCount: number; createdCount: number; assignedCount: number; unassignedCount: number; taskVersion: string };
+    }>(`/api/projects/${encodeURIComponent(projectId)}/tasks/generate/${encodeURIComponent(jobId)}`);
+  },
+  taskReassignmentOptions(subjectId: string) {
+    return requestJson<{
+      users: Array<{ id: string; username: string }>;
+      availableTaskCount: number;
+      sourceScorers: Array<{ username: string; taskCount: number }>;
+    }>(`/api/subjects/${encodeURIComponent(subjectId)}/tasks/reassignment-options`);
+  },
+  projectTaskReassignmentOptions(projectId: string) {
+    return requestJson<{
+      users: Array<{ id: string; username: string }>;
+      availableTaskCount: number;
+      sourceScorers: Array<{ username: string; taskCount: number }>;
+    }>(`/api/projects/${encodeURIComponent(projectId)}/tasks/reassignment-options`);
+  },
+  importProjectTaskAllocations(projectId: string, file: File) {
+    const body = new FormData();
+    body.append('file', file, file.name);
+    return requestJson<TaskAllocationImportResult>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/allocations/import`,
+      { method: 'POST', body }
+    );
+  },
+  reassignTasks(subjectId: string, payload: {
+    scorers: string[];
+    taskCount: number | null;
+    source: 'assigned_uncompleted' | 'selected_scorers';
+    sourceScorers?: string[];
+    allocations?: Array<{ scorer: string; taskCount: number }>;
+  }) {
+    return requestJson<{
+      reassignedCount: number;
+      remainingTaskCount: number;
+      distribution: Record<string, number>;
+    }>(`/api/subjects/${encodeURIComponent(subjectId)}/tasks/reassign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  },
+  reassignProjectTasks(projectId: string, payload: {
+    scorers: string[];
+    taskCount: number | null;
+    source: 'assigned_uncompleted' | 'selected_scorers';
+    sourceScorers?: string[];
+    allocations?: Array<{ scorer: string; taskCount: number }>;
+  }) {
+    return requestJson<{
+      reassignedCount: number;
+      remainingTaskCount: number;
+      distribution: Record<string, number>;
+    }>(`/api/projects/${encodeURIComponent(projectId)}/tasks/reassign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  },
   categories(subjectId?: string | null) {
     const params = new URLSearchParams();
     if (subjectId) params.set('subjectId', subjectId);
@@ -88,41 +686,132 @@ export const imageApi = {
     });
     return requestJson<ImagePage>(`/api/images?${params}`);
   },
-  importZip(file: File, options?: { uploadId?: string; onProgress?: (progress: number) => void }) {
-    const uploadId = options?.uploadId ?? createUploadId();
+  importZip(file: File, options?: {
+    uploadId?: string;
+    onProgress?: (progress: number) => void;
+    onProcessing?: (job: ImportJob) => void;
+  }) {
     const onProgress = options?.onProgress;
-    const totalChunks = Math.max(1, Math.ceil(file.size / ZIP_CHUNK_SIZE));
     const totalBytes = Math.max(file.size, 1);
 
     return (async () => {
+      const existingSession = getStoredResumableSession(file);
+      let session = existingSession;
+      let uploadCompleted = false;
       try {
         onProgress?.(0);
-        let uploadedBytes = 0;
-        for (let index = 0; index < totalChunks; index++) {
-          const start = index * ZIP_CHUNK_SIZE;
-          const end = Math.min(file.size, start + ZIP_CHUNK_SIZE);
-          const chunk = file.slice(start, end);
-          await uploadZipChunk(uploadId, index, chunk, (loaded, total) => {
-            const chunkBytes = Math.min(total || chunk.size, chunk.size);
-            const current = uploadedBytes + Math.min(loaded, chunkBytes);
-            onProgress?.(Math.min(99, (current / totalBytes) * 100));
-          });
-          uploadedBytes += chunk.size;
-          onProgress?.(Math.min(99, (uploadedBytes / totalBytes) * 100));
+        if (!session) {
+          session = await createResumableSession(file);
+          setStoredResumableSession(file, session);
+        } else {
+          const probe = await probeResumableSession(session.uploadUrl);
+          if (probe.status === 'missing') {
+            const existingJob = await requestJson<ImportJob>(
+              `/api/import/uploads/${encodeURIComponent(session.uploadId)}/status`
+            ).catch(() => null);
+            if (existingJob) {
+              uploadCompleted = true;
+              const result = await waitForImportJob(session.uploadId, existingJob, options?.onProcessing);
+              clearStoredResumableSession(file);
+              return result;
+            }
+            clearStoredResumableSession(file);
+            session = await createResumableSession(file);
+            setStoredResumableSession(file, session);
+          } else if (probe.status === 'processing') {
+            const job = await requestJson<ImportJob>(
+              `/api/import/uploads/${encodeURIComponent(session.uploadId)}/status`
+            );
+            uploadCompleted = true;
+            const result = await waitForImportJob(session.uploadId, job, options?.onProcessing);
+            clearStoredResumableSession(file);
+            return result;
+          } else {
+            session.offset = probe.offset;
+            session.uploadLength = probe.uploadLength || file.size;
+            setStoredResumableSession(file, session);
+          }
         }
 
-        const result = await requestJson<{ subject: SubjectItem; imported: number; skipped: number; batch: string }>(
-          `/api/import/chunks/${uploadId}/complete`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ filename: file.name, totalChunks })
+        let currentOffset = session.offset;
+        const reportedBytes = () => Math.min(99, (currentOffset / totalBytes) * 100);
+        onProgress?.(reportedBytes());
+
+        while (currentOffset < file.size) {
+          const start = currentOffset;
+          const end = Math.min(file.size, start + ZIP_CHUNK_SIZE);
+          const chunk = file.slice(start, end);
+          try {
+            const nextOffset = await uploadResumableChunkWithRetry(
+              session.uploadUrl,
+              currentOffset,
+              chunk,
+              (loaded, total) => {
+                const committed = Math.min(
+                  currentOffset + Math.min(loaded, total || chunk.size),
+                  file.size,
+                );
+                onProgress?.(Math.min(99, (committed / totalBytes) * 100));
+              },
+            );
+            currentOffset = Math.max(nextOffset, end);
+            session = { ...session, offset: currentOffset };
+            setStoredResumableSession(file, session);
+            onProgress?.(reportedBytes());
+          } catch (error) {
+            const status = (error as Error & { status?: number }).status;
+            const serverOffset = (error as Error & { serverOffset?: number }).serverOffset;
+            if (status === 409 && Number.isFinite(serverOffset)) {
+              currentOffset = Math.min(serverOffset as number, file.size);
+              session = { ...session, offset: currentOffset };
+              setStoredResumableSession(file, session);
+              onProgress?.(reportedBytes());
+              continue;
+            }
+
+            const probe = await probeResumableSession(session.uploadUrl).catch(() => null);
+            if (probe?.status === 'processing') {
+              const job = await requestJson<ImportJob>(
+                `/api/import/uploads/${encodeURIComponent(session.uploadId)}/status`
+              );
+              uploadCompleted = true;
+              const result = await waitForImportJob(session.uploadId, job, options?.onProcessing);
+              clearStoredResumableSession(file);
+              return result;
+            }
+            if (probe?.status === 'uploading') {
+              currentOffset = Math.min(probe.offset, file.size);
+              session = { ...session, offset: currentOffset };
+              setStoredResumableSession(file, session);
+              onProgress?.(reportedBytes());
+              continue;
+            }
+
+            const existingJob = await requestJson<ImportJob>(
+              `/api/import/uploads/${encodeURIComponent(session.uploadId)}/status`
+            ).catch(() => null);
+            if (existingJob) {
+              uploadCompleted = true;
+              const result = await waitForImportJob(session.uploadId, existingJob, options?.onProcessing);
+              clearStoredResumableSession(file);
+              return result;
+            }
+            throw error;
           }
-        );
+        }
+
         onProgress?.(100);
+        uploadCompleted = true;
+        const completeJob = await requestJson<ImportJob>(
+          `/api/import/uploads/${encodeURIComponent(session.uploadId)}/status`
+        );
+        const result = await waitForImportJob(session.uploadId, completeJob, options?.onProcessing);
+        clearStoredResumableSession(file);
         return result;
       } catch (error) {
-        await requestEmpty(`/api/import/chunks/${uploadId}`, { method: 'DELETE' }).catch(() => {});
+        if (uploadCompleted && (error as Error & { terminal?: boolean }).terminal) {
+          clearStoredResumableSession(file);
+        }
         throw error;
       }
     })();
@@ -131,6 +820,6 @@ export const imageApi = {
     return requestJson<ImageItem>(`/api/images/${id}/score`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(score) });
   },
   deleteSubject(id: string) {
-    return requestJson<{ subject: SubjectItem; deletedImages: number }>(`/api/subjects/${id}`, { method: 'DELETE' });
+    return requestJson<{ subject: SubjectItem; deletedImages: number; queued: boolean }>(`/api/subjects/${id}`, { method: 'DELETE' });
   }
 };

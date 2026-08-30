@@ -1,98 +1,53 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
-import {
-  cancelScorerName,
-  openScorerPrompt,
-  scorerName,
-  scorerPromptError,
-  scorerPromptValue,
-  scorerPromptVisible,
-  submitScorerName
-} from '../composables/scorer';
+import { darkTheme, type GlobalThemeOverrides } from 'naive-ui';
+import { useAppTheme } from '../composables/theme';
 
-const router = useRouter();
-const route = useRoute();
-
-const currentPageLabel = computed(() => (route.path.startsWith('/admin') ? '管理' : '打分'));
-
-const userMenuOptions = computed(() => [
-  {
-    label: scorerName.value ? `打分人：${scorerName.value}` : '打分人：未填写',
-    key: 'scorer-name',
-    disabled: true
-  },
-  { type: 'divider', key: 'divider' },
-  { label: '打分页面', key: 'rating' },
-  { label: '管理页面', key: 'admin' },
-  { label: scorerName.value ? '修改打分人' : '填写打分人', key: 'edit' }
-]);
-
-function handleMenuSelect(key: string | number) {
-  if (key === 'rating') {
-    void router.push('/');
-    return;
-  }
-  if (key === 'admin') {
-    void router.push('/admin');
-    return;
-  }
-  if (key === 'edit') {
-    void openScorerPrompt();
-  }
-}
-
-function handlePromptUpdateShow(value: boolean) {
-  if (!value) cancelScorerName();
-}
+const { isDark } = useAppTheme();
+const naiveTheme = computed(() => isDark.value ? darkTheme : null);
+const darkDataTableThemeOverrides: NonNullable<GlobalThemeOverrides['DataTable']> = {
+  borderColor: 'var(--border-soft-color)',
+  tdColor: 'var(--surface-bg)',
+  tdColorHover: 'var(--surface-muted-bg)',
+  tdColorSorting: 'var(--surface-muted-bg)',
+  tdColorStriped: 'var(--surface-muted-bg)',
+  tdTextColor: 'var(--text-color)',
+  thColor: 'var(--surface-muted-bg)',
+  thColorHover: 'var(--surface-soft-bg)',
+  thColorSorting: 'var(--surface-soft-bg)',
+  thTextColor: 'var(--text-muted-color)',
+  thButtonColorHover: 'var(--surface-soft-bg)',
+  thIconColor: 'var(--text-soft-color)',
+  borderColorModal: 'var(--border-soft-color)',
+  tdColorModal: 'var(--surface-bg)',
+  tdColorHoverModal: 'var(--surface-muted-bg)',
+  tdColorSortingModal: 'var(--surface-muted-bg)',
+  tdColorStripedModal: 'var(--surface-muted-bg)',
+  thColorModal: 'var(--surface-muted-bg)',
+  thColorHoverModal: 'var(--surface-soft-bg)',
+  thColorSortingModal: 'var(--surface-soft-bg)',
+  borderColorPopover: 'var(--border-soft-color)',
+  tdColorPopover: 'var(--surface-bg)',
+  tdColorHoverPopover: 'var(--surface-muted-bg)',
+  tdColorSortingPopover: 'var(--surface-muted-bg)',
+  tdColorStripedPopover: 'var(--surface-muted-bg)',
+  thColorPopover: 'var(--surface-muted-bg)',
+  thColorHoverPopover: 'var(--surface-soft-bg)',
+  thColorSortingPopover: 'var(--surface-soft-bg)'
+};
+const naiveThemeOverrides = computed<GlobalThemeOverrides | undefined>(() => isDark.value ? {
+  DataTable: darkDataTableThemeOverrides
+} : undefined);
 </script>
 
 <template>
-  <n-config-provider>
+  <n-config-provider :theme="naiveTheme" :theme-overrides="naiveThemeOverrides">
     <n-message-provider>
       <n-dialog-provider>
         <n-layout class="app">
-          <n-layout-header bordered class="header">
-            <strong>打分平台</strong>
-            <div class="header-actions">
-              <n-dropdown trigger="hover" placement="bottom-end" :options="userMenuOptions" @select="handleMenuSelect">
-                <n-button quaternary circle class="user-menu-button" aria-label="用户菜单" :title="`当前页面：${currentPageLabel}`">
-                  <svg class="user-menu-icon" viewBox="0 0 24 24" aria-hidden="true">
-                    <path
-                      d="M12 12c2.761 0 5-2.239 5-5s-2.239-5-5-5-5 2.239-5 5 2.239 5 5 5zm0 2c-4.418 0-8 2.239-8 5v1h16v-1c0-2.761-3.582-5-8-5z"
-                      fill="currentColor"
-                    />
-                  </svg>
-                </n-button>
-              </n-dropdown>
-            </div>
-          </n-layout-header>
           <router-view />
         </n-layout>
       </n-dialog-provider>
-      <n-modal
-        :show="scorerPromptVisible"
-        preset="dialog"
-        title="填写打分人"
-        positive-text="保存"
-        negative-text="取消"
-        :show-icon="false"
-        @positive-click="submitScorerName"
-        @negative-click="cancelScorerName"
-        @update:show="handlePromptUpdateShow"
-      >
-        <n-space vertical class="scorer-prompt-body">
-          <n-text depth="3">请输入你的名字，之后会自动保存在当前浏览器。</n-text>
-          <n-input
-            v-model:value="scorerPromptValue"
-            autofocus
-            maxlength="100"
-            placeholder="例如：张三"
-            @keyup.enter="submitScorerName"
-          />
-          <n-text v-if="scorerPromptError" class="scorer-prompt-error">{{ scorerPromptError }}</n-text>
-        </n-space>
-      </n-modal>
     </n-message-provider>
   </n-config-provider>
 </template>
