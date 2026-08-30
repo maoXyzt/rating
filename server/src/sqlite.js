@@ -247,8 +247,14 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_project_packages_project_created
     ON project_packages(projectId, createdAt ASC, packageId ASC);
   CREATE INDEX IF NOT EXISTS idx_project_packages_package_project ON project_packages(packageId, projectId);
-  CREATE INDEX IF NOT EXISTS idx_images_subject_category ON images(subjectId, category);
+  CREATE INDEX IF NOT EXISTS idx_images_subject_category_created
+    ON images(subjectId, category, createdAt DESC);
   CREATE INDEX IF NOT EXISTS idx_images_subject_createdAt ON images(subjectId, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_images_subject_scorer_created
+    ON images(subjectId, scorer, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_images_subject_overall_created
+    ON images(subjectId, overall, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_images_created ON images(createdAt DESC);
   CREATE INDEX IF NOT EXISTS idx_images_importBatch ON images(importBatch);
   CREATE INDEX IF NOT EXISTS idx_images_ratedAt ON images(ratedAt);
   CREATE INDEX IF NOT EXISTS idx_users_role_username ON users(role, username);
@@ -503,6 +509,10 @@ db.exec(`
       completed = project_task_stats.completed + excluded.completed,
       updatedAt = excluded.updatedAt;
   END;
+`);
+
+db.exec(`
+  DROP INDEX IF EXISTS idx_images_subject_category;
 `);
 
 const userColumns = db.prepare("PRAGMA table_info(users)").all();

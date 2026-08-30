@@ -30,6 +30,9 @@ const exportingProjects = ref(false);
 const exportingTeams = ref(false);
 const exportingScorers = ref(false);
 const dashboardReady = ref(false);
+const averageDurationVisible = ref(false);
+const averageDurationLoading = ref(false);
+const averageDurationLoaded = ref(false);
 const selectedProjectId = ref<string | null>(null);
 const selectedScorerId = ref<string | null>(null);
 const selectedTeamId = ref<string | null>(null);
@@ -270,8 +273,31 @@ const statCards = computed(() => [
   { key: 'task', label: '任务总数', value: formatNumber(dashboard.value.totalTaskCount), note: '当前任务版本', icon: statIconPaths.task },
   { key: 'pending', label: '待完成任务', value: formatNumber(dashboard.value.pendingTaskCount), note: `未分配 ${formatNumber(dashboard.value.unassignedTaskCount)} / 已分配 ${formatNumber(dashboard.value.assignedTaskCount)}`, icon: statIconPaths.pending },
   { key: 'completed', label: '已完成任务', value: formatNumber(dashboard.value.completedTaskCount), note: '已提交结果', icon: statIconPaths.completed },
-  { key: 'duration', label: '平均打分时间', value: formatDuration(dashboard.value.averageDurationSeconds), note: '已完成任务平均值', icon: statIconPaths.duration }
+  { key: 'duration', label: '平均打分时间', value: averageDurationLoaded.value ? formatDuration(dashboard.value.averageDurationSeconds) : '点击查看', note: '点击加载已完成任务平均值', icon: statIconPaths.duration }
 ]);
+
+async function openAverageDuration() {
+  averageDurationVisible.value = true;
+  if (averageDurationLoaded.value || averageDurationLoading.value) return;
+  averageDurationLoading.value = true;
+  try {
+    const result = await imageApi.adminDashboardAverageDuration();
+    dashboard.value = {
+      ...dashboard.value,
+      averageDurationSeconds: result.averageDurationSeconds
+    };
+    averageDurationLoaded.value = true;
+  } catch (error) {
+    averageDurationVisible.value = false;
+    message.error(errorMessage(error));
+  } finally {
+    averageDurationLoading.value = false;
+  }
+}
+
+function handleStatCardClick(key: string) {
+  if (key === 'duration') void openAverageDuration();
+}
 
 const projectMetricCards = computed(() => {
   const summary = dashboard.value.projectSummary;
@@ -394,20 +420,14 @@ async function loadDashboardWorkload() {
   }
 }
 
-async function loadDashboardOverview() {
-  loading.value = true;
-  try {
-    await Promise.all([
-      loadDashboardStats(),
-      loadDashboardProjectSection(),
-      loadDashboardCharts(),
-      loadDashboardWorkload()
-    ]);
-  } catch (error) {
-    message.error(errorMessage(error));
-  } finally {
-    loading.value = false;
-  }
+async function loadDashboardDetails() {
+  const results = await Promise.allSettled([
+    loadDashboardProjectSection(),
+    loadDashboardCharts(),
+    loadDashboardWorkload()
+  ]);
+  const failed = results.find(result => result.status === 'rejected');
+  if (failed?.status === 'rejected') message.error(errorMessage(failed.reason));
 }
 
 function selectAllExportProjects() {
@@ -522,15 +542,17 @@ watch([selectedScorerId, selectedTeamId], () => {
 });
 
 onMounted(async () => {
+  loading.value = true;
   try {
-    await Promise.all([loadProjects(), loadTeams()]);
-    await loadDashboardOverview();
+    await Promise.all([loadProjects(), loadTeams(), loadDashboardStats()]);
   } catch (error) {
     message.error(errorMessage(error));
-    loading.value = false;
   } finally {
-    dashboardReady.value = true;
+    loading.value = false;
   }
+  void loadDashboardDetails().finally(() => {
+    dashboardReady.value = true;
+  });
 });
 </script>
 
@@ -545,7 +567,11 @@ onMounted(async () => {
     </div>
 
     <section class="admin-dashboard-stat-grid" aria-label="核心指标">
-      <article v-for="card in statCards" :key="card.key" class="admin-dashboard-stat-card" :class="`is-${card.key}`">
+      <article v-for="card in statCards" :key="card.key" class="admin-dashboard-stat-card"
+        :class="[`is-${card.key}`, { 'is-clickable': card.key === 'duration' }]"
+        :role="card.key === 'duration' ? 'button' : undefined"
+        :tabindex="card.key === 'duration' ? 0 : undefined"
+        @click="handleStatCardClick(card.key)" @keydown.enter="handleStatCardClick(card.key)">
         <div class="admin-dashboard-stat-icon" :class="`is-${card.key}`">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
             stroke-linejoin="round" aria-hidden="true">
@@ -782,4 +808,14 @@ onMounted(async () => {
       </div>
     </section>
   </div>
+
+  <n-modal v-model:show="averageDurationVisible" preset="card" title="平均打分时间" :bordered="false"
+    style="width: min(420px, calc(100vw - 32px));">
+    <n-spin :show="averageDurationLoading">
+      <div class="dashboard-average-duration-dialog">
+        <n-text depth="3">统计范围：当前任务版本的已完成任务</n-text>
+        <strong>{{ averageDurationLoaded ? formatDuration(dashboard.averageDurationSeconds) : '正在计算...' }}</strong>
+      </div>
+    </n-spin>
+  </n-modal>
 </template>

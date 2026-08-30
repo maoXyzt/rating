@@ -1,4 +1,4 @@
-import type { AdminDashboard, AdminDashboardCharts, AdminDashboardProjectSection, AdminDashboardStats, AdminDashboardWorkloadSection, AdminTaskListItem, FeedbackPage, FeedbackStatus, FeedbackType, ImageItem, ImagePage, ImageQuery, ImageScore, ProjectItem, ProjectPage, RankingRelation, RatingTask, ScorerDashboard, ScorerTaskListItem, ScoringManagementSummary, ScoringRollbackJob, ScoringRollbackPreview, ScoringTaskRecordPage, SubjectItem, SubjectTaskReport, TaskListPage, TaskSubmissionMode, TaskSubmissionModeFilter } from '../types/image';
+import type { AdminDashboard, AdminDashboardAverageDuration, AdminDashboardCharts, AdminDashboardProjectSection, AdminDashboardStats, AdminDashboardWorkloadSection, AdminTaskListItem, FeedbackPage, FeedbackStatus, FeedbackType, ImageItem, ImagePage, ImageQuery, ImageScore, ProjectItem, ProjectPage, RankingRelation, RatingTask, ScorerDashboard, ScorerTaskListItem, ScoringManagementSummary, ScoringRollbackJob, ScoringRollbackPreview, ScoringTaskRecordPage, SubjectItem, SubjectTaskReport, TaskListPage, TaskSubmissionMode, TaskSubmissionModeFilter } from '../types/image';
 import { handleUnauthorized, requestJson, requestResponse } from './http';
 
 function downloadFilename(contentDisposition: string | null, fallback: string) {
@@ -301,6 +301,9 @@ export const imageApi = {
   },
   adminDashboardCharts() {
     return requestJson<AdminDashboardCharts>('/api/admin/dashboard/charts');
+  },
+  adminDashboardAverageDuration() {
+    return requestJson<AdminDashboardAverageDuration>('/api/admin/dashboard/average-duration');
   },
   adminDashboardWorkload(query: { scorerId?: string | null; teamId?: string | null } = {}) {
     const params = new URLSearchParams();
