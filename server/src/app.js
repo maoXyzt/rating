@@ -31,6 +31,7 @@ import {
 } from "./sqlite.js";
 import { createAdminDashboardService } from "./services/admin-dashboard.js";
 import { createAdminScoringService } from "./services/admin-scoring.js";
+import { createQueryWorkerPool } from "./query-worker-pool.js";
 
 const app = express();
 const taskImageSelectColumns =
@@ -596,6 +597,18 @@ const taskCriterionLabels = {
   designQuality: "整体设计感",
   typography: "文字设计感",
 };
+
+let queryWorkerPool;
+
+function getQueryWorkerPool() {
+  return (queryWorkerPool ||= createQueryWorkerPool({
+    taskVersion,
+    taskCriteria,
+    scoreNumericFields,
+    skippableScoreFields,
+    imageSelectColumns,
+  }));
+}
 const selectTaskRowsPageStmt = db.prepare(`
   SELECT id, subjectId, projectId, taskVersion, taskType, status, scorer, ranking, excludedImageIds, correctImageIds, rankingRelations,
          submissionMode, rankingActionCount, startedAt, completedAt, durationMs, editedAt, editCount,
@@ -5142,6 +5155,7 @@ function completeAssignedTask(taskId, body = {}) {
 
   invalidateTaskSummaryCaches(projectId);
   invalidateAssignedTaskListCache();
+  queryWorkerPool?.invalidate(["assignedTasks", "scorerDashboard"]);
   queueProjectTaskSummary(projectId);
   const updated = selectTaskByIdStmt.get(task.id);
   return hydrateTaskRows([updated])[0];
@@ -5218,6 +5232,7 @@ function updateCompletedTask(taskId, body = {}) {
 
   invalidateTaskSummaryCaches(task.projectId || task.subjectId);
   invalidateAssignedTaskListCache();
+  queryWorkerPool?.invalidate(["assignedTasks", "scorerDashboard"]);
   const updated = selectTaskByIdStmt.get(task.id);
   return hydrateTaskRows([updated])[0];
 }
@@ -6238,7 +6253,10 @@ app.get("/api/tasks/assigned/options", async (req, res, next) => {
 
 app.get("/api/tasks/assigned", async (req, res, next) => {
   try {
-    res.json(listAssignedTasks({ ...req.query, scorer: req.auth.username }));
+    res.json(await getQueryWorkerPool().run("assignedTasks", {
+      ...req.query,
+      scorer: req.auth.username,
+    }));
   } catch (error) {
     next(error);
   }
@@ -6246,7 +6264,10 @@ app.get("/api/tasks/assigned", async (req, res, next) => {
 
 app.get("/api/scorer/dashboard", async (req, res, next) => {
   try {
-    res.json(getScorerDashboard({ ...req.query, scorer: req.auth.username }));
+    res.json(await getQueryWorkerPool().run("scorerDashboard", {
+      ...req.query,
+      scorer: req.auth.username,
+    }));
   } catch (error) {
     next(error);
   }
@@ -6254,7 +6275,10 @@ app.get("/api/scorer/dashboard", async (req, res, next) => {
 
 app.get("/api/feedbacks", async (req, res, next) => {
   try {
-    res.json(listFeedbacks(req.query));
+    const result = req.auth.role === "admin"
+      ? listFeedbacks(req.query)
+      : await getQueryWorkerPool().run("feedbacks", req.query);
+    res.json(result);
   } catch (error) {
     next(error);
   }
@@ -6441,7 +6465,10 @@ app.get("/api/images", async (req, res, next) => {
       throw httpError(400, "请选择项目");
     if (req.query.subjectId)
       assertSubjectAccess(String(req.query.subjectId), req.auth);
-    res.json(listImages(req.query));
+    const result = req.auth.role === "admin"
+      ? listImages(req.query)
+      : await getQueryWorkerPool().run("images", req.query);
+    res.json(result);
   } catch (error) {
     next(error);
   }
@@ -7055,6 +7082,9 @@ app.use((error, req, res, _next) => {
         : "上传文件数据不完整，请重新上传";
   }
 
+  if (error.retryAfterSeconds != null) {
+    res.setHeader("Retry-After", String(error.retryAfterSeconds));
+  }
   res.status(status).json({ message, code: error.code || "REQUEST_FAILED" });
 });
 

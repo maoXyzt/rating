@@ -1,5 +1,5 @@
 import type { AdminDashboard, AdminDashboardAverageDuration, AdminDashboardCharts, AdminDashboardProjectSection, AdminDashboardStats, AdminDashboardWorkloadSection, AdminTaskListItem, FeedbackPage, FeedbackStatus, FeedbackType, ImageItem, ImagePage, ImageQuery, ImageScore, ProjectItem, ProjectPage, RankingRelation, RatingTask, ScorerDashboard, ScorerTaskListItem, ScoringManagementSummary, ScoringRollbackJob, ScoringRollbackPreview, ScoringTaskRecordPage, SubjectItem, SubjectTaskReport, TaskListPage, TaskSubmissionMode, TaskSubmissionModeFilter } from '../types/image';
-import { handleUnauthorized, requestJson, requestResponse } from './http';
+import { handleUnauthorized, requestJson, requestJsonWithRetry, requestResponse } from './http';
 
 function downloadFilename(contentDisposition: string | null, fallback: string) {
   const match = contentDisposition?.match(/filename="?([^";]+)"?/i);
@@ -523,7 +523,7 @@ export const imageApi = {
     if (query.status) params.set('status', query.status);
     if (query.criterion) params.set('criterion', query.criterion);
     if (query.summaryOnly) params.set('summaryOnly', '1');
-    return requestJson<TaskListPage<ScorerTaskListItem>>(`/api/tasks/assigned?${params}`);
+    return requestJsonWithRetry<TaskListPage<ScorerTaskListItem>>(`/api/tasks/assigned?${params}`);
   },
   assignedTaskDetail(taskId: string) {
     return requestJson<{ task: RatingTask }>(`/api/tasks/${encodeURIComponent(taskId)}`);
@@ -532,14 +532,14 @@ export const imageApi = {
     const params = new URLSearchParams();
     params.set('scorer', query.scorer);
     if (query.projectId) params.set('projectId', query.projectId);
-    return requestJson<ScorerDashboard>(`/api/scorer/dashboard?${params}`);
+    return requestJsonWithRetry<ScorerDashboard>(`/api/scorer/dashboard?${params}`);
   },
   feedbacks(query: { page?: number; pageSize?: number; status?: FeedbackStatus | null } = {}) {
     const params = new URLSearchParams();
     if (query.page) params.set('page', String(query.page));
     if (query.pageSize) params.set('pageSize', String(query.pageSize));
     if (query.status) params.set('status', query.status);
-    return requestJson<FeedbackPage>(`/api/feedbacks${params.toString() ? `?${params}` : ''}`);
+    return requestJsonWithRetry<FeedbackPage>(`/api/feedbacks${params.toString() ? `?${params}` : ''}`);
   },
   submitFeedback(payload: { title: string; type: FeedbackType; description: string; images: File[] }) {
     const body = new FormData();
@@ -697,7 +697,7 @@ export const imageApi = {
       else if (typeof value === 'object') params.set(key, JSON.stringify(value));
       else params.set(key, String(value));
     });
-    return requestJson<ImagePage>(`/api/images?${params}`);
+    return requestJsonWithRetry<ImagePage>(`/api/images?${params}`);
   },
   importZip(file: File, options?: {
     uploadId?: string;
