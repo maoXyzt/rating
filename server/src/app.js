@@ -4826,12 +4826,19 @@ function getTaskDetail(taskId, { projectId = null, scorer = null } = {}) {
   return hydrateTaskRows([task])[0];
 }
 
+const scorerDashboardCache = new Map();
+const scorerDashboardCacheTtlMs = 2 * 1000;
+
 function getScorerDashboard(query = {}) {
   const scorer = parseScorerName(query.scorer);
   if (!scorer) throw httpError(400, "缺少打分人");
   const projectId = query.projectId ? parseProjectId(query.projectId) : null;
   if (!selectScorerByUsernameStmt.get(scorer))
     throw httpError(404, "打分账号不存在");
+
+  const cacheKey = `${scorer}:${projectId || "all"}`;
+  const cached = scorerDashboardCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
 
   const stats = selectScorerTaskStatsStmt.get(
     taskVersion,
@@ -4843,13 +4850,18 @@ function getScorerDashboard(query = {}) {
   const completedTasks = Number(stats.completedTasks || 0);
   const totalTasks = pendingTasks + completedTasks;
 
-  return {
+  const value = {
     pendingTasks,
     completedTasks,
     totalTasks,
     projectCount: selectScorerProjectCountStmt.get(taskVersion, scorer).total,
     progress: totalTasks ? Math.round((completedTasks / totalTasks) * 100) : 0,
   };
+  scorerDashboardCache.set(cacheKey, {
+    value,
+    expiresAt: Date.now() + scorerDashboardCacheTtlMs,
+  });
+  return value;
 }
 
 function parseTaskExcludedImageIds(value, taskImageIds, taskType) {
