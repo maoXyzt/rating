@@ -3198,6 +3198,7 @@ function updateProject(id, body = {}) {
     }
     throw error;
   }
+  invalidateScorerQueryCaches();
   return projectDto(selectProjectByIdStmt.get(id));
 }
 
