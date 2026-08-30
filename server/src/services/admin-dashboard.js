@@ -36,6 +36,20 @@ export function createAdminDashboardService({
   selectScorerByUsernameStmt,
   selectTeamByIdStmt,
 }) {
+  const dashboardCache = new Map();
+  const dashboardCacheTtlMs = 15 * 1000;
+
+  function cachedDashboardValue(key, producer) {
+    const cached = dashboardCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const value = producer();
+    dashboardCache.set(key, {
+      value,
+      expiresAt: Date.now() + dashboardCacheTtlMs,
+    });
+    return value;
+  }
+
   const selectAdminDashboardStatsStmt = db.prepare(`
     SELECT
       (SELECT COUNT(*) FROM projects WHERE deletionRequestedAt IS NULL) AS projectCount,
@@ -59,14 +73,26 @@ export function createAdminDashboardService({
               AND teams.status = 'disabled'
           )
       ) AS scorerCount,
-      COUNT(*) AS totalTaskCount,
-      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS unassignedTaskCount,
-      SUM(CASE WHEN status = 'assigned' THEN 1 ELSE 0 END) AS assignedTaskCount,
-      SUM(CASE WHEN status IN ('pending', 'assigned') THEN 1 ELSE 0 END) AS pendingTaskCount,
-      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completedTaskCount,
-      AVG(CASE WHEN status = 'completed' AND durationMs >= 0 THEN durationMs END) AS averageDurationMs
-    FROM rating_tasks
-    WHERE taskVersion = ?
+      (SELECT COALESCE(SUM(total), 0)
+       FROM project_task_stats
+       WHERE taskVersion = ?) AS totalTaskCount,
+      (SELECT COALESCE(SUM(pending), 0)
+       FROM project_task_stats
+       WHERE taskVersion = ?) AS unassignedTaskCount,
+      (SELECT COALESCE(SUM(assigned), 0)
+       FROM project_task_stats
+       WHERE taskVersion = ?) AS assignedTaskCount,
+      (SELECT COALESCE(SUM(pending + assigned), 0)
+       FROM project_task_stats
+       WHERE taskVersion = ?) AS pendingTaskCount,
+      (SELECT COALESCE(SUM(completed), 0)
+       FROM project_task_stats
+       WHERE taskVersion = ?) AS completedTaskCount,
+      (SELECT AVG(durationMs)
+       FROM rating_tasks
+       WHERE taskVersion = ?
+         AND status = 'completed'
+         AND durationMs >= 0) AS averageDurationMs
   `);
 
   function parseDashboardProjectIds(query = {}) {
@@ -227,19 +253,18 @@ export function createAdminDashboardService({
   }
 
   function projectTaskStatusCounts(projectId) {
-    const rows = db
+    const row = db
       .prepare(
-        `SELECT status, COUNT(*) AS count
-         FROM rating_tasks
-         WHERE projectId = ? AND taskVersion = ?
-         GROUP BY status`,
+        `SELECT pending, assigned, completed
+         FROM project_task_stats
+         WHERE projectId = ? AND taskVersion = ?`,
       )
-      .all(projectId, taskVersion);
-    const counts = { pending: 0, assigned: 0, completed: 0 };
-    rows.forEach((row) => {
-      if (Object.hasOwn(counts, row.status)) counts[row.status] = Number(row.count || 0);
-    });
-    return counts;
+      .get(projectId, taskVersion);
+    return {
+      pending: Number(row?.pending || 0),
+      assigned: Number(row?.assigned || 0),
+      completed: Number(row?.completed || 0),
+    };
   }
 
   function getProjectOrThrow(projectId) {
@@ -449,39 +474,49 @@ export function createAdminDashboardService({
   }
 
   function getDashboardStats() {
-    const stats = selectAdminDashboardStatsStmt.get(taskVersion);
-    return {
-      projectCount: Number(stats.projectCount || 0),
-      completedProjectCount: Number(stats.completedProjectCount || 0),
-      teamCount: Number(stats.teamCount || 0),
-      scorerCount: Number(stats.scorerCount || 0),
-      totalTaskCount: Number(stats.totalTaskCount || 0),
-      unassignedTaskCount: Number(stats.unassignedTaskCount || 0),
-      assignedTaskCount: Number(stats.assignedTaskCount || 0),
-      pendingTaskCount: Number(stats.pendingTaskCount || 0),
-      completedTaskCount: Number(stats.completedTaskCount || 0),
-      averageDurationSeconds: stats.averageDurationMs == null ? null : stats.averageDurationMs / 1000,
-    };
+    return cachedDashboardValue("stats", () => {
+      const stats = selectAdminDashboardStatsStmt.get(
+        taskVersion,
+        taskVersion,
+        taskVersion,
+        taskVersion,
+        taskVersion,
+        taskVersion,
+      );
+      return {
+        projectCount: Number(stats.projectCount || 0),
+        completedProjectCount: Number(stats.completedProjectCount || 0),
+        teamCount: Number(stats.teamCount || 0),
+        scorerCount: Number(stats.scorerCount || 0),
+        totalTaskCount: Number(stats.totalTaskCount || 0),
+        unassignedTaskCount: Number(stats.unassignedTaskCount || 0),
+        assignedTaskCount: Number(stats.assignedTaskCount || 0),
+        pendingTaskCount: Number(stats.pendingTaskCount || 0),
+        completedTaskCount: Number(stats.completedTaskCount || 0),
+        averageDurationSeconds: stats.averageDurationMs == null ? null : stats.averageDurationMs / 1000,
+      };
+    });
   }
 
   function getDashboardProjectSection(query = {}) {
     const projectId = query.projectId
       ? parseProjectId(query.projectId)
       : defaultDashboardProjectId();
-    return {
+    return cachedDashboardValue(`project:${projectId || "none"}`, () => ({
       selectedProjectId: projectId,
       projectSummary: getDashboardProjectSummary(projectId),
-    };
+    }));
   }
 
   function getDashboardCharts() {
-    return {
+    return cachedDashboardValue("charts", () => ({
       peakHours: listDashboardPeakHours(),
-    };
+    }));
   }
 
   function getDashboardWorkloadSection(query = {}) {
-    return getDashboardWorkloadSummary(query);
+    const key = `workload:${String(query.scorerId || "")}:${String(query.teamId || "")}`;
+    return cachedDashboardValue(key, () => getDashboardWorkloadSummary(query));
   }
 
   function dashboardSummaryMetrics(row) {

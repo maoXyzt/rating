@@ -280,7 +280,7 @@ export const imageApi = {
     });
   },
   deleteProject(id: string) {
-    return requestJson<{ deleted: boolean }>(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    return requestJson<{ deleted: boolean; deletedTaskCount: number }>(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' });
   },
   adminDashboard(query: { projectId?: string | null; scorerId?: string | null; teamId?: string | null; page?: number; pageSize?: number } = {}) {
     const params = new URLSearchParams();
@@ -326,6 +326,7 @@ export const imageApi = {
   adminScoringTasks(query: {
     page?: number;
     pageSize?: number;
+    cursor?: string | null;
     scorer?: string | null;
     projectId?: string | null;
     submissionMode?: TaskSubmissionModeFilter | null;
@@ -335,6 +336,7 @@ export const imageApi = {
     const params = new URLSearchParams();
     if (query.page) params.set('page', String(query.page));
     if (query.pageSize) params.set('pageSize', String(query.pageSize));
+    if (query.cursor) params.set('cursor', query.cursor);
     if (query.scorer) params.set('scorer', query.scorer);
     if (query.projectId) params.set('projectId', query.projectId);
     if (query.submissionMode) params.set('submissionMode', query.submissionMode);
@@ -444,6 +446,7 @@ export const imageApi = {
   tasks(subjectId: string, query: {
     page?: number;
     pageSize?: number;
+    cursor?: string | null;
     status?: RatingTask['status'] | null;
     scorer?: string | null;
     criterion?: RatingTask['criterion'] | null;
@@ -451,6 +454,7 @@ export const imageApi = {
     const params = new URLSearchParams();
     if (query.page) params.set('page', String(query.page));
     if (query.pageSize) params.set('pageSize', String(query.pageSize));
+    if (query.cursor) params.set('cursor', query.cursor);
     if (query.status) params.set('status', query.status);
     if (query.scorer) params.set('scorer', query.scorer);
     if (query.criterion) params.set('criterion', query.criterion);
@@ -461,6 +465,7 @@ export const imageApi = {
   projectTasks(projectId: string, query: {
     page?: number;
     pageSize?: number;
+    cursor?: string | null;
     status?: RatingTask['status'] | null;
     scorer?: string | null;
     criterion?: RatingTask['criterion'] | null;
@@ -468,6 +473,7 @@ export const imageApi = {
     const params = new URLSearchParams();
     if (query.page) params.set('page', String(query.page));
     if (query.pageSize) params.set('pageSize', String(query.pageSize));
+    if (query.cursor) params.set('cursor', query.cursor);
     if (query.status) params.set('status', query.status);
     if (query.scorer) params.set('scorer', query.scorer);
     if (query.criterion) params.set('criterion', query.criterion);
@@ -500,6 +506,7 @@ export const imageApi = {
     projectId?: string | null;
     page?: number;
     pageSize?: number;
+    cursor?: string | null;
     status?: 'assigned' | 'completed' | null;
     criterion?: RatingTask['criterion'] | null;
   }) {
@@ -508,6 +515,7 @@ export const imageApi = {
     if (query.projectId) params.set('projectId', query.projectId);
     if (query.page) params.set('page', String(query.page));
     if (query.pageSize) params.set('pageSize', String(query.pageSize));
+    if (query.cursor) params.set('cursor', query.cursor);
     if (query.status) params.set('status', query.status);
     if (query.criterion) params.set('criterion', query.criterion);
     return requestJson<TaskListPage<ScorerTaskListItem>>(`/api/tasks/assigned?${params}`);

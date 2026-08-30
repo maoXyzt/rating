@@ -19,6 +19,8 @@ const loading = ref(false);
 const taskPage = ref(1);
 const taskPageSize = ref(10);
 const taskTotal = ref(0);
+const taskHasMore = ref(false);
+const taskCursors = ref<Record<number, string | null>>({ 1: null });
 const taskScorers = ref<string[]>([]);
 const detailTask = ref<RatingTask | null>(null);
 const detailVisible = ref(false);
@@ -438,11 +440,19 @@ const columns: DataTableColumns<AdminTaskListItem> = [
 async function loadTasks(page = taskPage.value, pageSize = taskPageSize.value) {
   loading.value = true;
   try {
-    const result = await imageApi.projectTasks(projectId, { page, pageSize, ...taskFilters });
+    if (page === 1) taskCursors.value = { 1: null };
+    const result = await imageApi.projectTasks(projectId, {
+      page,
+      pageSize,
+      cursor: taskCursors.value[page] || null,
+      ...taskFilters
+    });
     subject.value = result.subject;
     project.value = result.project;
     tasks.value = result.tasks;
-    taskTotal.value = result.total;
+    taskTotal.value = result.total ?? 0;
+    taskHasMore.value = result.hasMore;
+    if (result.nextCursor) taskCursors.value[page + 1] = result.nextCursor;
     taskPage.value = result.page;
     taskPageSize.value = result.pageSize;
   } catch (error) {
@@ -476,7 +486,9 @@ function changeTaskPageSize(pageSize: number) {
 }
 
 function taskPaginationPrefix({ itemCount }: { itemCount?: number }) {
-  return `共 ${itemCount ?? taskTotal.value} 个任务`;
+  return taskTotal.value
+    ? `共 ${itemCount ?? taskTotal.value} 个任务`
+    : `第 ${taskPage.value} 页`;
 }
 
 watch(taskFilters, () => void loadTasks(1, taskPageSize.value), { deep: true });
@@ -519,7 +531,8 @@ onMounted(() => {
         <div v-else class="empty">{{ loading ? '正在加载任务...' : '暂无任务' }}</div>
       </div>
       <div class="task-table-footer">
-        <n-pagination v-if="taskTotal" :page="taskPage" :page-size="taskPageSize" :item-count="taskTotal" show-size-picker
+        <n-pagination v-if="taskHasMore || taskPage > 1" :page="taskPage" :page-size="taskPageSize"
+          :page-count="taskPage + (taskHasMore ? 1 : 0)" show-size-picker
           :page-sizes="[10, 20, 50, 100]" :prefix="taskPaginationPrefix" @update:page="changeTaskPage"
           @update:page-size="changeTaskPageSize" />
       </div>

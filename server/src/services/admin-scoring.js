@@ -36,6 +36,26 @@ function parseOptionalSubmissionMode(value, httpError) {
   return mode;
 }
 
+function parseTaskCursor(value, httpError) {
+  if (!value) return null;
+  let parsed;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) : value;
+  } catch {
+    throw httpError(400, "任务分页游标格式不正确");
+  }
+  const completedAt = String(parsed?.completedAt ?? "");
+  const id = String(parsed?.id ?? "");
+  if (!completedAt || !id) throw httpError(400, "任务分页游标格式不正确");
+  return { completedAt, id };
+}
+
+function includeTaskTotal(query = {}) {
+  return ["1", "true", "yes"].includes(
+    String(query.includeTotal ?? "").toLowerCase(),
+  );
+}
+
 function parseDurationSeconds(value, label, httpError) {
   const raw = String(value ?? "").trim();
   if (!raw) return null;
@@ -134,6 +154,8 @@ export function createAdminScoringService({
 }) {
   const rollbackJobs = new Map();
   const activeRollbackJobsByKey = new Map();
+  const summaryCache = new Map();
+  const summaryCacheTtlMs = 15 * 1000;
 
   function buildSummaryFilter(query = {}) {
     const clauses = [
@@ -181,7 +203,7 @@ export function createAdminScoringService({
     return { where: `WHERE ${clauses.join(" AND ")}`, params };
   }
 
-  function listScoringSummary(query = {}) {
+  function calculateScoringSummary(query = {}) {
     const { page, pageSize } = parseTaskPagination(query);
     const filter = buildTaskFilter(query);
     const totalScorerCount = Number(
@@ -270,14 +292,35 @@ export function createAdminScoringService({
     };
   }
 
+  function listScoringSummary(query = {}) {
+    const key = JSON.stringify({
+      page: query.page || 1,
+      pageSize: query.pageSize || 10,
+      scorer: query.scorer || null,
+      projectId: query.projectId || null,
+      submissionMode: query.submissionMode || null,
+    });
+    const cached = summaryCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const value = calculateScoringSummary(query);
+    summaryCache.set(key, {
+      value,
+      expiresAt: Date.now() + summaryCacheTtlMs,
+    });
+    return value;
+  }
+
   function listScoringTaskRecords(query = {}) {
     const { page, pageSize } = parseTaskPagination(query);
     const filter = buildTaskFilter(query);
-    const total = Number(
-      db
-        .prepare(`SELECT COUNT(*) AS total FROM rating_tasks ${filter.where}`)
-        .get(...filter.params).total || 0,
-    );
+    const cursor = parseTaskCursor(query.cursor, httpError);
+    const total = includeTaskTotal(query)
+      ? Number(
+        db
+          .prepare(`SELECT COUNT(*) AS total FROM rating_tasks ${filter.where}`)
+          .get(...filter.params).total || 0,
+      )
+      : null;
     const rows = db
       .prepare(
         `SELECT rating_tasks.id, rating_tasks.subjectId, rating_tasks.projectId,
@@ -289,16 +332,29 @@ export function createAdminScoringService({
          FROM rating_tasks
          JOIN projects ON projects.id = rating_tasks.projectId
          ${filter.where}
+         ${cursor ? "AND (rating_tasks.completedAt < ? OR (rating_tasks.completedAt = ? AND rating_tasks.id > ?))" : ""}
          ORDER BY rating_tasks.completedAt DESC, rating_tasks.id ASC
-         LIMIT ? OFFSET ?`,
+         LIMIT ?${cursor ? "" : " OFFSET ?"}`,
       )
-      .all(...filter.params, pageSize, (page - 1) * pageSize);
+      .all(
+        ...filter.params,
+        ...(cursor ? [cursor.completedAt, cursor.completedAt, cursor.id] : []),
+        pageSize + 1,
+        ...(cursor ? [] : [(page - 1) * pageSize]),
+      );
+    const hasMore = rows.length > pageSize;
+    const pageRows = rows.slice(0, pageSize);
+    const lastRow = pageRows[pageRows.length - 1];
 
     return {
       total,
       page,
       pageSize,
-      tasks: rows.map(taskRecordDto),
+      hasMore,
+      nextCursor: hasMore && lastRow
+        ? JSON.stringify({ completedAt: lastRow.completedAt, id: lastRow.id })
+        : null,
+      tasks: pageRows.map(taskRecordDto),
     };
   }
 

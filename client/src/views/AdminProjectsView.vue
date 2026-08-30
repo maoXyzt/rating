@@ -62,12 +62,13 @@ const teamOptions = computed(() => teams.value.map(team => ({
   value: team.id
 })));
 const taskTemplateCount = computed(() => pendingTaskProject.value?.taskTemplateCount || 0);
+const availableTaskCount = computed(() => pendingTaskProject.value?.availableTaskCount ?? taskTemplateCount.value);
 const selectedTaskScorerSet = computed(() => new Set(selectedTaskScorers.value));
 const assignedTaskCount = computed(() => selectedTaskScorers.value.reduce(
   (total, username) => total + Math.max(0, Math.floor(Number(taskAllocations.value[username]) || 0)),
   0
 ));
-const remainingTaskCount = computed(() => Math.max(taskTemplateCount.value - assignedTaskCount.value, 0));
+const remainingTaskCount = computed(() => Math.max(availableTaskCount.value - assignedTaskCount.value, 0));
 const allocationPayload = computed(() => selectedTaskScorers.value.map(username => ({
   scorer: username,
   taskCount: Math.max(0, Math.floor(Number(taskAllocations.value[username]) || 0))
@@ -267,7 +268,7 @@ function updateTaskAllocation(username: string, value: number | null) {
 }
 
 function normalizeTaskAllocations(editedUsername: string) {
-  const limit = taskTemplateCount.value;
+  const limit = availableTaskCount.value;
   if (!limit) return;
 
   const selected = taskScorers.value.filter(user => selectedTaskScorerSet.value.has(user.username));
@@ -307,9 +308,9 @@ function distributeEvenly() {
     message.error('请先选择打分人');
     return;
   }
-  if (!taskTemplateCount.value) return;
-  const base = Math.floor(taskTemplateCount.value / users.length);
-  const remainder = taskTemplateCount.value % users.length;
+  if (!availableTaskCount.value) return;
+  const base = Math.floor(availableTaskCount.value / users.length);
+  const remainder = availableTaskCount.value % users.length;
   taskAllocations.value = Object.fromEntries(taskScorers.value.map(user => [
     user.username,
     selectedTaskScorerSet.value.has(user.username)
@@ -329,8 +330,8 @@ function assignFixedTaskCount() {
     return;
   }
   const total = taskCount * selectedTaskScorerCount.value;
-  if (total > taskTemplateCount.value) {
-    message.error(`分配总数不能超过 ${taskTemplateCount.value}`);
+  if (total > availableTaskCount.value) {
+    message.error(`分配总数不能超过 ${availableTaskCount.value}`);
     return;
   }
   taskAllocations.value = Object.fromEntries(taskScorers.value.map(user => [
@@ -371,7 +372,7 @@ function applyAllocationImport(result: TaskAllocationImportResult) {
     ignoredCount: ignoredScorers.length,
     invalidCount: result.errors.length,
     totalTaskCount,
-    overflow: Math.max(0, totalTaskCount - taskTemplateCount.value),
+    overflow: Math.max(0, totalTaskCount - availableTaskCount.value),
     ignoredScorers,
     errors: result.errors
   };
@@ -404,7 +405,7 @@ async function importAllocationSheet({ file, onFinish, onError }: UploadCustomRe
 }
 
 async function openTaskProject(project: ProjectItem) {
-  if (project.taskStatus !== 'task_pending') {
+  if (!['task_pending', 'scoring'].includes(project.taskStatus)) {
     void router.push(`/admin/projects/${encodeURIComponent(project._id)}/tasks`);
     return;
   }
@@ -447,6 +448,10 @@ async function startTask() {
     message.error('关联图包未提供 tasks.json，无法创建任务');
     return;
   }
+  if (!availableTaskCount.value) {
+    message.error('当前项目没有可继续下发的任务');
+    return;
+  }
   if (!taskTeamIds.value.length) {
     message.error('请至少选择一个标注团队');
     return;
@@ -459,8 +464,8 @@ async function startTask() {
     message.error('请至少为一名打分人设置任务数量');
     return;
   }
-  if (assignedTaskCount.value > taskTemplateCount.value) {
-    message.error(`已分配任务数量不能超过 ${taskTemplateCount.value}`);
+  if (assignedTaskCount.value > availableTaskCount.value) {
+    message.error(`已分配任务数量不能超过 ${availableTaskCount.value}`);
     return;
   }
   submitting.value = true;
@@ -492,9 +497,9 @@ async function startTask() {
     if (!result) throw new Error('任务生成完成，但没有返回结果');
     taskStack.finishTask(taskId, {
       stage: '任务创建完成',
-      description: `已导入 ${result.createdCount} 个，已分配 ${result.assignedCount} 个`
+      description: `已生成 ${result.createdCount} 个，已分配 ${result.assignedCount} 个`
     });
-    message.success(`已导入 ${result.createdCount} 个任务，已分配 ${result.assignedCount} 个，待分配 ${result.unassignedCount} 个`);
+    message.success(`已生成 ${result.createdCount} 个任务，已分配 ${result.assignedCount} 个，待分配 ${result.unassignedCount} 个`);
     await loadData();
     await router.push(`/admin/projects/${encodeURIComponent(project._id)}/tasks`);
   } catch (error) {
@@ -512,13 +517,13 @@ async function startTask() {
 function removeProject(project: ProjectItem) {
   dialog.warning({
     title: '删除项目',
-    content: `确认删除“${project.name}”？未生成任务的项目可以删除。`,
+    content: `确认删除“${project.name}”？项目会被删除，图包和图片会保留；待分配及已分配但未标注的任务会被清理，已完成标注记录保留。`,
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {
       try {
-        await imageApi.deleteProject(project._id);
-        message.success('项目已删除');
+        const result = await imageApi.deleteProject(project._id);
+        message.success(`项目已删除，清理了 ${result.deletedTaskCount} 个未完成任务`);
         const nextPage = projects.value.length === 1 && projectPage.value > 1 ? projectPage.value - 1 : projectPage.value;
         await loadData(nextPage, projectPageSize.value);
       } catch (error) {
@@ -568,11 +573,11 @@ const columns: DataTableColumns<ProjectItem> = [
   {
     title: '功能', key: 'actions', fixed: 'right', width: 220,
     render: row => h('div', { class: 'table-actions' }, [
-      row.taskStatus === 'task_pending'
-        ? h(NButton, { size: 'small', type: 'primary', secondary: true, loading: taskGenerating.value.has(row._id), disabled: !row.taskTemplateCount, onClick: () => openTaskProject(row) }, { default: () => row.taskTemplateCount ? '开始任务' : '缺少任务文件' })
+      ['task_pending', 'scoring'].includes(row.taskStatus)
+        ? h(NButton, { size: 'small', type: 'primary', secondary: true, loading: taskGenerating.value.has(row._id), disabled: !(row.availableTaskCount ?? row.taskTemplateCount), onClick: () => openTaskProject(row) }, { default: () => (row.availableTaskCount ?? row.taskTemplateCount) ? (row.taskStatus === 'scoring' ? '继续下发' : '开始任务') : '缺少任务文件' })
         : null,
       h(NButton, { size: 'small', tertiary: true, onClick: () => openEditProject(row) }, { default: () => '编辑' }),
-      h(NButton, { size: 'small', tertiary: true, type: 'error', disabled: row.taskStatus !== 'task_pending', onClick: () => removeProject(row) }, { default: () => '删除' })
+      h(NButton, { size: 'small', tertiary: true, type: 'error', disabled: taskGenerating.value.has(row._id), onClick: () => removeProject(row) }, { default: () => '删除' })
     ].filter(Boolean))
   }
 ];
@@ -636,6 +641,7 @@ onMounted(() => void loadData());
         </n-form-item>
         <div class="task-allocation-summary" aria-label="任务分配汇总">
           <n-tag size="small" type="info" :bordered="false">模板任务 {{ taskTemplateCount }}</n-tag>
+          <n-tag size="small" :bordered="false">可下发 {{ availableTaskCount }}</n-tag>
           <n-tag size="small" :bordered="false">已选 {{ selectedTaskScorerCount }}</n-tag>
           <n-tag size="small" type="success" :bordered="false">已分配 {{ assignedTaskCount }}</n-tag>
           <n-tag size="small" :bordered="false">待分配 {{ remainingTaskCount }}</n-tag>
@@ -650,7 +656,7 @@ onMounted(() => void loadData());
           </div>
           <div class="task-allocation-fixed">
             <span>每人</span>
-            <n-input-number v-model:value="perScorerTaskCount" size="small" :min="1" :max="taskTemplateCount"
+            <n-input-number v-model:value="perScorerTaskCount" size="small" :min="1" :max="availableTaskCount"
               :show-button="true" />
             <span>个</span>
             <n-button size="small" secondary :disabled="!selectedTaskScorerCount"
@@ -678,7 +684,7 @@ onMounted(() => void loadData());
             无效行 {{ allocationImportFeedback.invalidCount }} 条：{{ allocationImportFeedback.errors.slice(0, 3).join('；') }}
           </div>
           <div v-if="allocationImportFeedback.overflow">
-            超出模板任务 {{ allocationImportFeedback.overflow }} 个，请调整后再创建任务
+            超出可下发任务 {{ allocationImportFeedback.overflow }} 个，请调整后再创建任务
           </div>
         </n-alert>
         <div v-if="taskScorersLoading" class="task-allocation-empty">正在加载团队成员...</div>
@@ -688,7 +694,7 @@ onMounted(() => void loadData());
             <n-checkbox :checked="selectedTaskScorerSet.has(user.username)"
               @update:checked="(checked: boolean) => updateTaskScorerSelected(user.username, checked)" />
             <span class="task-allocation-scorer">{{ user.username }}</span>
-            <n-input-number :value="taskAllocations[user.username] ?? 0" :min="0" :max="taskTemplateCount"
+            <n-input-number :value="taskAllocations[user.username] ?? 0" :min="0" :max="availableTaskCount"
               :show-button="true" :disabled="!selectedTaskScorerSet.has(user.username)"
               @update:value="(value: number | null) => updateTaskAllocation(user.username, value)"
               @blur="() => normalizeTaskAllocations(user.username)" />

@@ -92,7 +92,7 @@ const rankingComplete = computed(() => {
   if ([...orderedIds].some(imageId => excludedIds.has(imageId))) return false;
   return [...orderedIds, ...excludedIds].every(imageId => taskIds.has(imageId));
 });
-const rankingRelations = computed<RankingRelation[]>(() => isCorrectnessCriterion.value ? [] : orderedItems.value.slice(0, -1).map((item, index) => {
+const rankingRelations = computed<RankingRelation[]>(() => orderedItems.value.slice(0, -1).map((item, index) => {
   const nextItem = orderedItems.value[index + 1];
   return nextItem && equalPairKeys.value.includes(pairKey(item.imageId, nextItem.imageId)) ? '=' : '>';
 }));
@@ -227,7 +227,6 @@ function rankAt(index: number) {
 }
 
 function toggleRelation(index: number) {
-  if (isCorrectnessCriterion.value) return;
   const left = orderedItems.value[index];
   const right = orderedItems.value[index + 1];
   if (!left || !right) return;
@@ -426,7 +425,7 @@ async function submit(advance = false) {
                 v-if="criterionLabel === 'Prompt alignment'">prompt</n-button>
 
             </article>
-            <button v-if="!isCorrectnessCriterion && index < orderedItems.length - 1" type="button"
+            <button v-if="index < orderedItems.length - 1" type="button"
               class="task-ranking-relation-button" :class="{ 'is-equal': relationAt(index) === '=' }"
               :title="relationAt(index) === '=' ? '同档，点击切换为优先级' : '前者优于后者，点击切换为同档'"
               :aria-label="relationAt(index) === '=' ? '同档，点击切换为优先级' : '前者优于后者，点击切换为同档'" @pointerdown.stop

@@ -31,6 +31,8 @@ const detailRecords = ref<ScoringTaskRecord[]>([]);
 const detailTotal = ref(0);
 const detailPage = ref(1);
 const detailPageSize = ref(20);
+const detailHasMore = ref(false);
+const detailCursors = ref<Record<number, string | null>>({ 1: null });
 const scorerPage = ref(1);
 const scorerPageSize = ref(10);
 const rollbackVisible = ref(false);
@@ -171,15 +173,19 @@ async function loadDetail(page = detailPage.value, pageSize = detailPageSize.val
   if (!scorer) return;
   detailLoading.value = true;
   try {
+    if (page === 1) detailCursors.value = { 1: null };
     const result = await imageApi.adminScoringTasks({
       page,
       pageSize,
+      cursor: detailCursors.value[page] || null,
       scorer,
       projectId: filters.projectId,
       submissionMode: filters.submissionMode
     });
     detailRecords.value = result.tasks;
-    detailTotal.value = result.total;
+    detailTotal.value = result.total ?? 0;
+    detailHasMore.value = result.hasMore;
+    if (result.nextCursor) detailCursors.value[page + 1] = result.nextCursor;
     detailPage.value = result.page;
     detailPageSize.value = result.pageSize;
   } catch (error) {
@@ -200,6 +206,8 @@ async function reloadSummary() {
 
 function applyFilters() {
   scorerPage.value = 1;
+  detailPage.value = 1;
+  detailCursors.value = { 1: null };
   void reloadSummary();
 }
 
@@ -208,6 +216,8 @@ function resetFilters() {
   filters.projectId = null;
   filters.submissionMode = null;
   scorerPage.value = 1;
+  detailPage.value = 1;
+  detailCursors.value = { 1: null };
   void reloadSummary();
 }
 
@@ -228,6 +238,8 @@ function openScorerDetails(row: ScoringSummaryScorer) {
   detailRecords.value = [];
   detailTotal.value = 0;
   detailPage.value = 1;
+  detailHasMore.value = false;
+  detailCursors.value = { 1: null };
   detailVisible.value = true;
   void loadDetail(1, detailPageSize.value);
 }
@@ -247,7 +259,9 @@ function changeDetailPageSize(pageSize: number) {
 }
 
 function detailPaginationPrefix({ itemCount }: { itemCount?: number }) {
-  return `共 ${itemCount ?? detailTotal.value} 条任务`;
+  return detailTotal.value
+    ? `共 ${itemCount ?? detailTotal.value} 条任务`
+    : `第 ${detailPage.value} 页`;
 }
 
 function wait(milliseconds: number) {
@@ -485,7 +499,8 @@ onMounted(() => void initialize());
           </template>
         </n-data-table>
         <div class="scoring-detail-footer">
-          <n-pagination v-if="detailTotal" :page="detailPage" :page-size="detailPageSize" :item-count="detailTotal"
+          <n-pagination v-if="detailHasMore || detailPage > 1" :page="detailPage" :page-size="detailPageSize"
+            :page-count="detailPage + (detailHasMore ? 1 : 0)"
             show-size-picker :page-sizes="[10, 20, 50, 100]" :prefix="detailPaginationPrefix"
             @update:page="changeDetailPage" @update:page-size="changeDetailPageSize" />
         </div>

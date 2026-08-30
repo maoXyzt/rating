@@ -49,8 +49,7 @@ export const projectSelectColumns = `
   subjects.originalFilename AS packageFilename,
   subjects.imageCount,
   subjects.categoryCount,
-  subjects.status AS packageStatus,
-  (SELECT COUNT(*) FROM subject_task_templates WHERE subject_task_templates.subjectId = subjects.id) AS taskTemplateCount
+  subjects.status AS packageStatus
 `;
 export const imageSelectColumns = `id AS _id, subjectId, filename, originalPath, storagePath, thumbnailPath, mimeType, category, directory, isInfographic, prompt, catalogData, importBatch, scorer, ${scoreNumericFields.join(", ")}, ${scoreStateFields.join(", ")}, discomfort, comment, ratedAt, createdAt, updatedAt`;
 export const userSelectColumns =
@@ -71,7 +70,7 @@ await fs.mkdir(path.dirname(configuredDbPath), { recursive: true });
 
 export const db = new DatabaseSync(configuredDbPath);
 
-db.exec("PRAGMA busy_timeout = 10000;");
+db.exec("PRAGMA busy_timeout = 30000;");
 
 db.exec(`
   PRAGMA foreign_keys = ON;
@@ -242,7 +241,11 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_subjects_createdAt ON subjects(createdAt DESC);
   CREATE INDEX IF NOT EXISTS idx_projects_createdAt ON projects(createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_projects_deleted_created
+    ON projects(deletionRequestedAt, createdAt DESC, id ASC);
   CREATE INDEX IF NOT EXISTS idx_projects_packageId ON projects(packageId);
+  CREATE INDEX IF NOT EXISTS idx_project_packages_project_created
+    ON project_packages(projectId, createdAt ASC, packageId ASC);
   CREATE INDEX IF NOT EXISTS idx_project_packages_package_project ON project_packages(packageId, projectId);
   CREATE INDEX IF NOT EXISTS idx_images_subject_category ON images(subjectId, category);
   CREATE INDEX IF NOT EXISTS idx_images_subject_createdAt ON images(subjectId, createdAt DESC);
@@ -294,6 +297,7 @@ db.exec(`
     excludedImageIds TEXT,
     correctImageIds TEXT,
     rankingRelations TEXT,
+    assignmentKey INTEGER NOT NULL DEFAULT 0,
     submissionMode TEXT CHECK (submissionMode IN ('direct', 'ranked')),
     rankingActionCount INTEGER NOT NULL DEFAULT 0,
     startedAt TEXT,
@@ -321,6 +325,18 @@ db.exec(`
     FOREIGN KEY (imageId) REFERENCES images(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS project_task_stats (
+    projectId TEXT NOT NULL,
+    taskVersion TEXT NOT NULL,
+    total INTEGER NOT NULL DEFAULT 0,
+    pending INTEGER NOT NULL DEFAULT 0,
+    assigned INTEGER NOT NULL DEFAULT 0,
+    completed INTEGER NOT NULL DEFAULT 0,
+    updatedAt TEXT NOT NULL,
+    PRIMARY KEY (projectId, taskVersion),
+    FOREIGN KEY (projectId) REFERENCES projects(id) ON DELETE CASCADE
+  );
+
   -- A ZIP package owns immutable task definitions. Projects copy these
   -- definitions into rating_tasks when work starts, then assign them to users.
   CREATE TABLE IF NOT EXISTS subject_task_templates (
@@ -330,6 +346,7 @@ db.exec(`
     round INTEGER NOT NULL,
     criterion TEXT NOT NULL,
     imageKey TEXT NOT NULL,
+    selectionKey INTEGER NOT NULL DEFAULT 0,
     createdAt TEXT NOT NULL,
     FOREIGN KEY (subjectId) REFERENCES subjects(id) ON DELETE CASCADE,
     UNIQUE (subjectId, sourceTaskId),
@@ -392,11 +409,21 @@ db.exec(`
     ON rating_tasks(subjectId, taskVersion, scorer, round, taskType, createdAt, id);
   CREATE INDEX IF NOT EXISTS idx_rating_tasks_subject_version_task_type_order
     ON rating_tasks(subjectId, taskVersion, taskType, round, createdAt, id);
+  CREATE INDEX IF NOT EXISTS idx_rating_tasks_project_template
+    ON rating_tasks(projectId, taskVersion, subjectId, round, taskType, imageKey);
+  CREATE INDEX IF NOT EXISTS idx_rating_tasks_project_order
+    ON rating_tasks(projectId, taskVersion, taskType, createdAt, id);
+  CREATE INDEX IF NOT EXISTS idx_rating_tasks_project_status_order
+    ON rating_tasks(projectId, taskVersion, status, taskType, createdAt, id);
+  CREATE INDEX IF NOT EXISTS idx_rating_tasks_project_scorer_order
+    ON rating_tasks(projectId, taskVersion, scorer, taskType, createdAt, id);
   CREATE INDEX IF NOT EXISTS idx_rating_tasks_scorer_status ON rating_tasks(scorer, status, subjectId);
   CREATE INDEX IF NOT EXISTS idx_rating_tasks_export ON rating_tasks(taskVersion, status, completedAt DESC, id);
   CREATE INDEX IF NOT EXISTS idx_rating_tasks_scorer_version_status ON rating_tasks(scorer, taskVersion, status, subjectId);
   CREATE INDEX IF NOT EXISTS idx_rating_tasks_scorer_version_status_updated
     ON rating_tasks(scorer, taskVersion, status, updatedAt DESC, id);
+  CREATE INDEX IF NOT EXISTS idx_rating_tasks_version_scorer_status_order
+    ON rating_tasks(taskVersion, scorer, status, taskType, createdAt, id);
   CREATE INDEX IF NOT EXISTS idx_rating_task_items_image ON rating_task_items(imageId);
   CREATE INDEX IF NOT EXISTS idx_subject_task_templates_subject_order
     ON subject_task_templates(subjectId, round, criterion, sourceTaskId);
@@ -406,6 +433,76 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_feedbacks_submitter_status_created ON feedbacks(submitter, status, submittedAt DESC);
   CREATE INDEX IF NOT EXISTS idx_feedbacks_status_created ON feedbacks(status, submittedAt DESC);
   CREATE INDEX IF NOT EXISTS idx_feedback_messages_feedback_created ON feedback_messages(feedbackId, createdAt ASC, id ASC);
+
+  CREATE TRIGGER IF NOT EXISTS trg_rating_tasks_stats_insert
+  AFTER INSERT ON rating_tasks
+  WHEN NEW.projectId IS NOT NULL
+  BEGIN
+    INSERT INTO project_task_stats (
+      projectId, taskVersion, total, pending, assigned, completed, updatedAt
+    ) VALUES (
+      NEW.projectId,
+      NEW.taskVersion,
+      1,
+      CASE WHEN NEW.status = 'pending' THEN 1 ELSE 0 END,
+      CASE WHEN NEW.status = 'assigned' THEN 1 ELSE 0 END,
+      CASE WHEN NEW.status = 'completed' THEN 1 ELSE 0 END,
+      NEW.updatedAt
+    )
+    ON CONFLICT(projectId, taskVersion) DO UPDATE SET
+      total = project_task_stats.total + 1,
+      pending = project_task_stats.pending + excluded.pending,
+      assigned = project_task_stats.assigned + excluded.assigned,
+      completed = project_task_stats.completed + excluded.completed,
+      updatedAt = excluded.updatedAt;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_rating_tasks_stats_delete
+  AFTER DELETE ON rating_tasks
+  WHEN OLD.projectId IS NOT NULL
+  BEGIN
+    UPDATE project_task_stats
+    SET total = MAX(0, total - 1),
+        pending = MAX(0, pending - CASE WHEN OLD.status = 'pending' THEN 1 ELSE 0 END),
+        assigned = MAX(0, assigned - CASE WHEN OLD.status = 'assigned' THEN 1 ELSE 0 END),
+        completed = MAX(0, completed - CASE WHEN OLD.status = 'completed' THEN 1 ELSE 0 END),
+        updatedAt = OLD.updatedAt
+    WHERE projectId = OLD.projectId AND taskVersion = OLD.taskVersion;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_rating_tasks_stats_update
+  AFTER UPDATE OF projectId, taskVersion, status ON rating_tasks
+  WHEN COALESCE(OLD.projectId, '') <> COALESCE(NEW.projectId, '')
+    OR OLD.taskVersion <> NEW.taskVersion
+    OR OLD.status <> NEW.status
+  BEGIN
+    UPDATE project_task_stats
+    SET total = MAX(0, total - 1),
+        pending = MAX(0, pending - CASE WHEN OLD.status = 'pending' THEN 1 ELSE 0 END),
+        assigned = MAX(0, assigned - CASE WHEN OLD.status = 'assigned' THEN 1 ELSE 0 END),
+        completed = MAX(0, completed - CASE WHEN OLD.status = 'completed' THEN 1 ELSE 0 END),
+        updatedAt = NEW.updatedAt
+    WHERE projectId = OLD.projectId AND taskVersion = OLD.taskVersion;
+
+    INSERT INTO project_task_stats (
+      projectId, taskVersion, total, pending, assigned, completed, updatedAt
+    )
+    SELECT
+      NEW.projectId,
+      NEW.taskVersion,
+      1,
+      CASE WHEN NEW.status = 'pending' THEN 1 ELSE 0 END,
+      CASE WHEN NEW.status = 'assigned' THEN 1 ELSE 0 END,
+      CASE WHEN NEW.status = 'completed' THEN 1 ELSE 0 END,
+      NEW.updatedAt
+    WHERE NEW.projectId IS NOT NULL
+    ON CONFLICT(projectId, taskVersion) DO UPDATE SET
+      total = project_task_stats.total + 1,
+      pending = project_task_stats.pending + excluded.pending,
+      assigned = project_task_stats.assigned + excluded.assigned,
+      completed = project_task_stats.completed + excluded.completed,
+      updatedAt = excluded.updatedAt;
+  END;
 `);
 
 const userColumns = db.prepare("PRAGMA table_info(users)").all();
@@ -704,14 +801,104 @@ addRatingTaskColumnIfMissing("rollbackCount", "rollbackCount INTEGER NOT NULL DE
 addRatingTaskColumnIfMissing("lastRolledBackAt", "lastRolledBackAt TEXT");
 addRatingTaskColumnIfMissing("lastRolledBackBy", "lastRolledBackBy TEXT");
 addRatingTaskColumnIfMissing("projectId", "projectId TEXT");
+addRatingTaskColumnIfMissing(
+  "assignmentKey",
+  "assignmentKey INTEGER NOT NULL DEFAULT 0",
+);
 db.exec(`
   UPDATE rating_tasks
   SET projectId = subjectId
   WHERE projectId IS NULL OR TRIM(projectId) = ''
 `);
+db.exec(`
+  UPDATE rating_tasks
+  SET assignmentKey = (random() & 2147483647)
+  WHERE assignmentKey = 0
+`);
 db.exec(
   "CREATE INDEX IF NOT EXISTS idx_rating_tasks_project ON rating_tasks(projectId, taskVersion, round, taskType)",
 );
+db.exec(
+  "CREATE INDEX IF NOT EXISTS idx_rating_tasks_project_template ON rating_tasks(projectId, taskVersion, subjectId, round, taskType, imageKey)",
+);
+db.exec(
+  "CREATE INDEX IF NOT EXISTS idx_rating_tasks_project_order ON rating_tasks(projectId, taskVersion, taskType, createdAt, id)",
+);
+db.exec(
+  "CREATE INDEX IF NOT EXISTS idx_rating_tasks_project_status_order ON rating_tasks(projectId, taskVersion, status, taskType, createdAt, id)",
+);
+db.exec(
+  "CREATE INDEX IF NOT EXISTS idx_rating_tasks_project_scorer_order ON rating_tasks(projectId, taskVersion, scorer, taskType, createdAt, id)",
+);
+db.exec(
+  "CREATE INDEX IF NOT EXISTS idx_rating_tasks_project_assignment ON rating_tasks(projectId, taskVersion, status, assignmentKey, id)",
+);
+db.exec(
+  "CREATE INDEX IF NOT EXISTS idx_rating_tasks_project_scorer_assignment ON rating_tasks(projectId, taskVersion, status, scorer, assignmentKey, id)",
+);
+db.exec(
+  "CREATE INDEX IF NOT EXISTS idx_rating_tasks_version_scorer_status_order ON rating_tasks(taskVersion, scorer, status, taskType, createdAt, id)",
+);
+
+const templateColumns = db
+  .prepare("PRAGMA table_info(subject_task_templates)")
+  .all();
+if (!templateColumns.some((column) => column.name === "selectionKey")) {
+  db.exec(
+    "ALTER TABLE subject_task_templates ADD COLUMN selectionKey INTEGER NOT NULL DEFAULT 0",
+  );
+}
+db.exec(`
+  UPDATE subject_task_templates
+  SET selectionKey = (random() & 2147483647)
+  WHERE selectionKey = 0
+`);
+db.exec(
+  "CREATE INDEX IF NOT EXISTS idx_subject_task_templates_selection ON subject_task_templates(subjectId, selectionKey, id)",
+);
+
+const projectTaskStatsBackfillKey = "project_task_stats_v1";
+if (
+  !db
+    .prepare("SELECT 1 FROM schema_meta WHERE key = ?")
+    .get(projectTaskStatsBackfillKey)
+) {
+  const migratedAt = new Date().toISOString();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      INSERT INTO project_task_stats (
+        projectId, taskVersion, total, pending, assigned, completed, updatedAt
+      )
+      SELECT
+        projectId,
+        taskVersion,
+        COUNT(*),
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
+        SUM(CASE WHEN status = 'assigned' THEN 1 ELSE 0 END),
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END),
+        '${migratedAt}'
+      FROM rating_tasks
+      WHERE projectId IS NOT NULL
+      GROUP BY projectId, taskVersion
+      ON CONFLICT(projectId, taskVersion) DO UPDATE SET
+        total = excluded.total,
+        pending = excluded.pending,
+        assigned = excluded.assigned,
+        completed = excluded.completed,
+        updatedAt = excluded.updatedAt
+    `);
+    db.prepare(
+      "INSERT INTO schema_meta (key, value, updatedAt) VALUES (?, ?, ?)",
+    ).run(projectTaskStatsBackfillKey, "completed", migratedAt);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
 
 const imageColumns = db.prepare("PRAGMA table_info(images)").all();
 function addImageColumnIfMissing(name, definition) {

@@ -86,6 +86,10 @@ export interface ProjectItem {
   imageCount: number;
   categoryCount: number;
   taskTemplateCount: number;
+  generatedTaskCount: number;
+  pendingTaskCount: number;
+  remainingTemplateCount: number;
+  availableTaskCount: number;
   taskStatus: SubjectItem['taskStatus'];
   teams: Array<{ id: string; name: string; status?: AvailabilityStatus }>;
   deletionRequestedAt?: string | null;
@@ -213,9 +217,11 @@ export interface ScoringTaskRecord {
 }
 
 export interface ScoringTaskRecordPage {
-  total: number;
+  total: number | null;
   page: number;
   pageSize: number;
+  hasMore: boolean;
+  nextCursor: string | null;
   tasks: ScoringTaskRecord[];
 }
 
@@ -301,9 +307,11 @@ export interface ScorerTaskListItem {
 }
 
 export interface TaskListPage<T> {
-  total: number;
+  total: number | null;
   page: number;
   pageSize: number;
+  hasMore: boolean;
+  nextCursor: string | null;
   tasks: T[];
 }
 

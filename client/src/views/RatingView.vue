@@ -13,6 +13,8 @@ const loading = ref(false);
 const taskTotal = ref(0);
 const taskPage = ref(1);
 const taskPageSize = ref(10);
+const taskHasMore = ref(false);
+const taskCursors = ref<Record<number, string | null>>({ 1: null });
 const activeTask = ref<RatingTask | null>(null);
 const rankingVisible = ref(false);
 const openingTaskId = ref<string | null>(null);
@@ -54,7 +56,9 @@ function criterionLabel(key: RatingTask['criterion']) {
 }
 
 function paginationPrefix({ itemCount }: { itemCount?: number }) {
-  return `共 ${itemCount ?? taskTotal.value} 个任务`;
+  return taskTotal.value
+    ? `共 ${itemCount ?? taskTotal.value} 个任务`
+    : `第 ${taskPage.value} 页`;
 }
 
 function changePage(page: number) {
@@ -70,14 +74,18 @@ async function loadTasks(page = taskPage.value, pageSize = taskPageSize.value) {
   if (!scorer) return;
   loading.value = true;
   try {
+    if (page === 1) taskCursors.value = { 1: null };
     const result = await imageApi.assignedTasks({
       scorer,
       page,
       pageSize,
+      cursor: taskCursors.value[page] || null,
       ...taskFilters
     });
     tasks.value = result.tasks;
-    taskTotal.value = result.total;
+    taskTotal.value = result.total ?? 0;
+    taskHasMore.value = result.hasMore;
+    if (result.nextCursor) taskCursors.value[page + 1] = result.nextCursor;
     taskPage.value = result.page;
     taskPageSize.value = result.pageSize;
   } catch (error) {
@@ -296,7 +304,8 @@ onMounted(() => {
         <div v-else class="empty">{{ loading ? '正在加载任务...' : '暂无任务' }}</div>
       </div>
       <div class="scorer-task-table-footer">
-        <n-pagination v-if="taskTotal" :page="taskPage" :page-size="taskPageSize" :item-count="taskTotal" show-size-picker
+        <n-pagination v-if="taskHasMore || taskPage > 1" :page="taskPage" :page-size="taskPageSize"
+          :page-count="taskPage + (taskHasMore ? 1 : 0)" show-size-picker
           :page-sizes="[10, 20, 50]" :prefix="paginationPrefix" @update:page="changePage"
           @update:page-size="changePageSize" />
       </div>

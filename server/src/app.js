@@ -173,10 +173,12 @@ const importJobs = new Map();
 const taskGenerationJobs = new Map();
 const activeTaskGenerationBySubject = new Map();
 const sessionSeenWriteAt = new Map();
+const subjectTaskReportCache = new Map();
+const subjectTaskReportCacheTtlMs = 15 * 1000;
 const sessionSeenWriteIntervalMs = 5 * 60 * 1000;
 // Keep task generation transactions large enough to amortize SQLite commit
 // overhead without holding the write lock for the entire job.
-const TASK_WRITE_BATCH_SIZE = 5000;
+const TASK_WRITE_BATCH_SIZE = 500;
 const TASK_ASSIGN_BATCH_SIZE = 500;
 const sessionDurationMs = 7 * 24 * 60 * 60 * 1000;
 
@@ -258,13 +260,24 @@ const selectProjectPackagesStmt = db.prepare(`
          subjects.status,
          subjects.createdAt,
          subjects.updatedAt,
-         (SELECT COUNT(*)
-          FROM subject_task_templates
-          WHERE subject_task_templates.subjectId = subjects.id) AS taskTemplateCount
+         COUNT(subject_task_templates.id) AS taskTemplateCount
   FROM project_packages
   JOIN subjects ON subjects.id = project_packages.packageId
+  LEFT JOIN subject_task_templates
+    ON subject_task_templates.subjectId = subjects.id
   WHERE project_packages.projectId = ?
     AND subjects.deletionRequestedAt IS NULL
+  GROUP BY project_packages.projectId,
+           project_packages.packageId,
+           project_packages.createdAt,
+           subjects.id,
+           subjects.name,
+           subjects.originalFilename,
+           subjects.imageCount,
+           subjects.categoryCount,
+           subjects.status,
+           subjects.createdAt,
+           subjects.updatedAt
   ORDER BY project_packages.createdAt ASC, subjects.createdAt ASC, subjects.id ASC
 `);
 const insertProjectStmt = db.prepare(`
@@ -298,6 +311,12 @@ const updateProjectTaskStatusStmt = db.prepare(`
 `);
 const selectProjectTaskCountStmt = db.prepare(
   "SELECT COUNT(*) AS total FROM rating_tasks WHERE projectId = ?",
+);
+const deleteUncompletedProjectTasksStmt = db.prepare(
+  "DELETE FROM rating_tasks WHERE projectId = ? AND status <> 'completed'",
+);
+const deleteProjectUserLinksStmt = db.prepare(
+  "DELETE FROM user_projects WHERE projectId = ?",
 );
 const deleteProjectStmt = db.prepare(
   "DELETE FROM projects WHERE id = ? AND deletionRequestedAt IS NULL",
@@ -670,18 +689,11 @@ const updateCompletedTaskStmt = db.prepare(`
     AND status = 'completed'
     AND scorer = @scorer
 `);
-const selectRemainingSubjectTaskCountStmt = db.prepare(`
-  SELECT COUNT(*) AS total
-  FROM rating_tasks
-  WHERE projectId = ?
-    AND taskVersion = ?
-    AND status <> 'completed'
-`);
 const insertRatingTaskStmt = db.prepare(`
   INSERT OR IGNORE INTO rating_tasks (
-    id, subjectId, projectId, taskVersion, round, taskType, status, scorer, ranking, imageKey, createdAt, updatedAt
+    id, subjectId, projectId, taskVersion, round, taskType, status, scorer, ranking, assignmentKey, imageKey, createdAt, updatedAt
   ) VALUES (
-    @id, @subjectId, @projectId, @taskVersion, @round, @taskType, 'pending', NULL, NULL, @imageKey, @createdAt, @updatedAt
+    @id, @subjectId, @projectId, @taskVersion, @round, @taskType, 'pending', NULL, NULL, @assignmentKey, @imageKey, @createdAt, @updatedAt
   )
 `);
 const insertRatingTaskItemStmt = db.prepare(`
@@ -690,9 +702,9 @@ const insertRatingTaskItemStmt = db.prepare(`
 `);
 const insertSubjectTaskTemplateStmt = db.prepare(`
   INSERT INTO subject_task_templates (
-    id, subjectId, sourceTaskId, round, criterion, imageKey, createdAt
+    id, subjectId, sourceTaskId, round, criterion, imageKey, selectionKey, createdAt
   ) VALUES (
-    @id, @subjectId, @sourceTaskId, @round, @criterion, @imageKey, @createdAt
+    @id, @subjectId, @sourceTaskId, @round, @criterion, @imageKey, @selectionKey, @createdAt
   )
 `);
 const insertSubjectTaskTemplateItemStmt = db.prepare(`
@@ -700,19 +712,19 @@ const insertSubjectTaskTemplateItemStmt = db.prepare(`
   VALUES (@templateId, @imageId, @position, @role)
 `);
 const selectSubjectTaskTemplatesStmt = db.prepare(`
-  SELECT id, sourceTaskId, criterion, imageKey
+  SELECT id, subjectId, sourceTaskId, round, criterion, imageKey, selectionKey
   FROM subject_task_templates
   WHERE subjectId = ?
-  ORDER BY criterion ASC, sourceTaskId ASC
+  ORDER BY selectionKey ASC, id ASC
 `);
 const updateSubjectTaskStatusStmt = db.prepare(`
   UPDATE projects
   SET taskStatus = @taskStatus, updatedAt = @updatedAt
   WHERE id = @id
 `);
-const selectCurrentTaskCountStmt = db.prepare(`
-  SELECT COUNT(*) AS total
-  FROM rating_tasks
+const selectProjectTaskStatsStmt = db.prepare(`
+  SELECT total, pending, assigned, completed
+  FROM project_task_stats
   WHERE projectId = ? AND taskVersion = ?
 `);
 const selectPendingProjectTaskIdsStmt = db.prepare(`
@@ -721,7 +733,9 @@ const selectPendingProjectTaskIdsStmt = db.prepare(`
   WHERE projectId = ?
     AND taskVersion = ?
     AND status = 'pending'
-  ORDER BY taskType ASC, createdAt ASC, id ASC
+    AND scorer IS NULL
+  ORDER BY assignmentKey ASC, id ASC
+  LIMIT ?
 `);
 const selectSubjectScorerNamesStmt = db.prepare(`
   SELECT DISTINCT scorer
@@ -761,22 +775,6 @@ const selectAvailableSubjectScorersStmt = db.prepare(`
     )
   ORDER BY username COLLATE NOCASE ASC
 `);
-const selectReassignableTaskCountStmt = db.prepare(`
-  SELECT COUNT(*) AS total
-  FROM rating_tasks
-  WHERE projectId = ?
-    AND taskVersion = ?
-    AND status = 'pending'
-    AND scorer IS NULL
-`);
-const selectAssignedReassignableTaskCountStmt = db.prepare(`
-  SELECT COUNT(*) AS total
-  FROM rating_tasks
-  WHERE projectId = ?
-    AND taskVersion = ?
-    AND status = 'assigned'
-    AND scorer IS NOT NULL
-`);
 const selectReassignableTaskIdsStmt = db.prepare(`
   SELECT id
   FROM rating_tasks
@@ -784,7 +782,8 @@ const selectReassignableTaskIdsStmt = db.prepare(`
     AND taskVersion = ?
     AND status = 'pending'
     AND scorer IS NULL
-  ORDER BY id ASC
+  ORDER BY assignmentKey ASC, id ASC
+  LIMIT ?
 `);
 const selectReassignableTaskIdsByScorerStmt = db.prepare(`
   SELECT id
@@ -793,7 +792,8 @@ const selectReassignableTaskIdsByScorerStmt = db.prepare(`
     AND taskVersion = ?
     AND status = 'assigned'
     AND scorer = ?
-  ORDER BY id ASC
+  ORDER BY assignmentKey ASC, id ASC
+  LIMIT ?
 `);
 const reassignTaskStmt = db.prepare(`
   UPDATE rating_tasks
@@ -1222,6 +1222,7 @@ function buildTaskTemplateRecords(subjectId, taskManifest, imageRecords, created
       round: 1,
       criterion,
       imageKey,
+      selectionKey: crypto.randomInt(1, 2147483647),
       createdAt,
       items,
       };
@@ -2633,9 +2634,125 @@ function teamDto(row) {
     : null;
 }
 
-function projectDto(row) {
+function getProjectTaskStats(projectId, version = taskVersion) {
+  const row = selectProjectTaskStatsStmt.get(projectId, version);
+  return {
+    total: Number(row?.total || 0),
+    pending: Number(row?.pending || 0),
+    assigned: Number(row?.assigned || 0),
+    completed: Number(row?.completed || 0),
+  };
+}
+
+function invalidateTaskSummaryCaches(projectId) {
+  subjectTaskReportCache.delete(projectId);
+}
+
+function projectStatsByIds(projectIds, version = taskVersion) {
+  const ids = [...new Set(projectIds.filter(Boolean))];
+  if (!ids.length) return new Map();
+  const rows = db
+    .prepare(
+      `SELECT projectId, total, pending, assigned, completed
+       FROM project_task_stats
+       WHERE taskVersion = ?
+         AND projectId IN (${placeholders(ids.length)})`,
+    )
+    .all(version, ...ids);
+  return new Map(
+    rows.map((row) => [
+      row.projectId,
+      {
+        total: Number(row.total || 0),
+        pending: Number(row.pending || 0),
+        assigned: Number(row.assigned || 0),
+        completed: Number(row.completed || 0),
+      },
+    ]),
+  );
+}
+
+function projectRelatedRowsByIds(projectIds) {
+  const ids = [...new Set(projectIds.filter(Boolean))];
+  if (!ids.length) return new Map();
+
+  const packageRows = db
+    .prepare(
+      `SELECT project_packages.projectId AS _projectId,
+              subjects.id AS _id,
+              subjects.name,
+              subjects.originalFilename,
+              subjects.imageCount,
+              subjects.categoryCount,
+              subjects.status,
+              subjects.createdAt,
+              subjects.updatedAt,
+              COUNT(subject_task_templates.id) AS taskTemplateCount
+       FROM project_packages
+       JOIN subjects ON subjects.id = project_packages.packageId
+       LEFT JOIN subject_task_templates
+         ON subject_task_templates.subjectId = subjects.id
+       WHERE project_packages.projectId IN (${placeholders(ids.length)})
+         AND subjects.deletionRequestedAt IS NULL
+       GROUP BY project_packages.projectId,
+                project_packages.packageId,
+                project_packages.createdAt,
+                subjects.id,
+                subjects.name,
+                subjects.originalFilename,
+                subjects.imageCount,
+                subjects.categoryCount,
+                subjects.status,
+                subjects.createdAt,
+                subjects.updatedAt
+       ORDER BY project_packages.projectId ASC,
+                project_packages.createdAt ASC,
+                subjects.createdAt ASC,
+                subjects.id ASC`,
+    )
+    .all(...ids);
+  const teamRows = db
+    .prepare(
+      `SELECT project_teams.projectId AS _projectId,
+              teams.id,
+              teams.name,
+              teams.status
+       FROM project_teams
+       JOIN teams ON teams.id = project_teams.teamId
+       WHERE project_teams.projectId IN (${placeholders(ids.length)})
+       ORDER BY project_teams.projectId ASC, teams.name COLLATE NOCASE ASC`,
+    )
+    .all(...ids);
+  const relatedByProjectId = new Map();
+  ids.forEach((id) => {
+    relatedByProjectId.set(id, { packageRows: [], teamRows: [] });
+  });
+  packageRows.forEach((row) => {
+    relatedByProjectId.get(row._projectId)?.packageRows.push(row);
+  });
+  teamRows.forEach((row) => {
+    relatedByProjectId.get(row._projectId)?.teamRows.push(row);
+  });
+  return relatedByProjectId;
+}
+
+function mapProjectRows(rows) {
+  const statsByProjectId = projectStatsByIds(rows.map((row) => row._id));
+  const relatedByProjectId = projectRelatedRowsByIds(rows.map((row) => row._id));
+  return rows.map((row) =>
+    projectDto(
+      row,
+      statsByProjectId.get(row._id),
+      relatedByProjectId.get(row._id),
+    ),
+  );
+}
+
+function projectDto(row, taskStats = null, related = null) {
   if (!row) return null;
-  const packageRows = selectProjectPackagesStmt.all(row._id);
+  const packageRows = related?.packageRows?.length
+    ? related.packageRows
+    : selectProjectPackagesStmt.all(row._id);
   const fallbackPackage = row.packageId
     ? [{
         _id: row.packageId,
@@ -2652,6 +2769,14 @@ function projectDto(row) {
   const packages = packageRows.length ? packageRows : fallbackPackage;
   const primaryPackage =
     packages.find((item) => item._id === row.packageId) || packages[0] || null;
+  const taskTemplateCount = packages.reduce(
+    (total, item) => total + Number(item.taskTemplateCount || 0),
+    0,
+  );
+  const stats = taskStats || getProjectTaskStats(row._id);
+  const generatedTaskCount = stats.total;
+  const pendingTaskCount = stats.pending;
+  const remainingTemplateCount = Math.max(taskTemplateCount - generatedTaskCount, 0);
   return {
     _id: row._id,
     name: row.name,
@@ -2674,39 +2799,40 @@ function projectDto(row) {
       (total, item) => total + Number(item.categoryCount || 0),
       0,
     ),
-    taskTemplateCount: packages.reduce(
-      (total, item) => total + Number(item.taskTemplateCount || 0),
-      0,
-    ),
+    taskTemplateCount,
+    generatedTaskCount,
+    pendingTaskCount,
+    remainingTemplateCount,
+    availableTaskCount: pendingTaskCount + remainingTemplateCount,
     taskStatus: row.taskStatus || "task_pending",
     deletionRequestedAt: row.deletionRequestedAt ?? null,
-    teams: selectProjectTeamsStmt.all(row._id).map(teamDto),
+    teams: (related?.teamRows || selectProjectTeamsStmt.all(row._id)).map(teamDto),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
 }
 
-function projectSubjectDto(project) {
-  const projectView = projectDto(project);
-  if (!projectView) return null;
+function projectSubjectDto(project, projectView = null) {
+  const view = projectView || projectDto(project);
+  if (!view) return null;
   return {
-    _id: projectView._id,
-    name: projectView.name,
-    originalFilename: projectView.packageNames.join("、"),
-    importBatch: projectView.packageIds.join(","),
-    imageCount: projectView.imageCount,
-    categoryCount: projectView.categoryCount,
-    taskTemplateCount: projectView.taskTemplateCount,
-    status: projectView.packageStatus,
-    taskStatus: projectView.taskStatus,
-    deletionRequestedAt: projectView.deletionRequestedAt,
-    createdAt: projectView.createdAt,
-    updatedAt: projectView.updatedAt,
+    _id: view._id,
+    name: view.name,
+    originalFilename: view.packageNames.join("、"),
+    importBatch: view.packageIds.join(","),
+    imageCount: view.imageCount,
+    categoryCount: view.categoryCount,
+    taskTemplateCount: view.taskTemplateCount,
+    status: view.packageStatus,
+    taskStatus: view.taskStatus,
+    deletionRequestedAt: view.deletionRequestedAt,
+    createdAt: view.createdAt,
+    updatedAt: view.updatedAt,
   };
 }
 
 function listProjects() {
-  return selectProjectsStmt.all().map(projectDto);
+  return mapProjectRows(selectProjectsStmt.all());
 }
 
 function listProjectsPage(query = {}) {
@@ -2719,7 +2845,7 @@ function listProjectsPage(query = {}) {
        WHERE projects.deletionRequestedAt IS NULL`,
     )
     .get().total;
-  const projects = db
+  const projectRows = db
     .prepare(
       `SELECT ${projectSelectColumns}
        FROM projects
@@ -2728,8 +2854,8 @@ function listProjectsPage(query = {}) {
        ORDER BY projects.createdAt DESC, projects.id ASC
        LIMIT ? OFFSET ?`,
     )
-    .all(pageSize, (page - 1) * pageSize)
-    .map(projectDto);
+    .all(pageSize, (page - 1) * pageSize);
+  const projects = mapProjectRows(projectRows);
   return { total, page, pageSize, projects };
 }
 
@@ -3024,7 +3150,7 @@ function listVisibleProjects(user, query = {}) {
   if (user?.role === "admin") {
     return hasPaginationQuery(query) ? listProjectsPage(query) : listProjects();
   }
-  return db
+  const rows = db
     .prepare(`
       SELECT DISTINCT ${projectSelectColumns}
       FROM projects
@@ -3036,18 +3162,34 @@ function listVisibleProjects(user, query = {}) {
         AND rating_tasks.status IN ('assigned', 'completed')
       ORDER BY projects.createdAt DESC, projects.id ASC
     `)
-    .all(taskVersion, user?.username || "")
-    .map(projectDto);
+    .all(taskVersion, user?.username || "");
+  return mapProjectRows(rows);
 }
 
 function deleteProject(id) {
   const project = getProjectOrThrow(id);
-  const taskCount = selectProjectTaskCountStmt.get(project._id).total;
-  if (taskCount) {
-    throw httpError(409, "项目已有任务，不能删除；请保留项目以保护评分记录");
+  const activeJobId = activeTaskGenerationBySubject.get(project._id);
+  const activeJob = activeJobId ? taskGenerationJobs.get(activeJobId) : null;
+  if (activeJob && ["queued", "running"].includes(activeJob.status)) {
+    throw httpError(409, "任务正在生成，请等待生成完成后再删除项目");
   }
-  if (!deleteProjectStmt.run(project._id).changes) throw httpError(404, "项目不存在");
-  return { deleted: true };
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const deletedTaskCount = deleteUncompletedProjectTasksStmt.run(project._id).changes;
+    deleteProjectUserLinksStmt.run(project._id);
+    if (!deleteProjectStmt.run(project._id).changes) {
+      throw httpError(404, "项目不存在");
+    }
+    db.exec("COMMIT");
+    invalidateTaskSummaryCaches(project._id);
+    return { deleted: true, deletedTaskCount };
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
 }
 
 const queuedSubjectDeletionIds = new Set();
@@ -3689,8 +3831,7 @@ function dimensionTaskType(projectId, packageId, criterion) {
   return projectId === packageId ? baseType : `${baseType}:project:${projectId}`;
 }
 
-async function loadSubjectTaskTemplates(subjectId) {
-  const templates = selectSubjectTaskTemplatesStmt.all(subjectId);
+async function hydrateSubjectTaskTemplates(templates) {
   if (!templates.length) return [];
 
   const templateIds = templates.map((template) => template.id);
@@ -3728,11 +3869,27 @@ async function loadSubjectTaskTemplates(subjectId) {
   }));
 }
 
+async function loadSubjectTaskTemplates(subjectId, limit = null) {
+  const templates = limit == null
+    ? selectSubjectTaskTemplatesStmt.all(subjectId)
+    : db.prepare(`
+        SELECT id, subjectId, sourceTaskId, round, criterion, imageKey, selectionKey
+        FROM subject_task_templates
+        WHERE subjectId = ?
+        ORDER BY selectionKey ASC, id ASC
+        LIMIT ?
+      `).all(subjectId, limit);
+  return hydrateSubjectTaskTemplates(templates);
+}
+
 async function loadProjectTaskTemplates(projectId) {
   const project = selectProjectByIdStmt.get(projectId);
   if (!project) throw httpError(404, "项目不存在");
+  const packageIds = projectPackageIds(project);
+  if (!packageIds.length) return [];
+
   const templates = [];
-  for (const packageId of projectPackageIds(project)) {
+  for (const packageId of packageIds) {
     const packageTemplates = await loadSubjectTaskTemplates(packageId);
     templates.push(...packageTemplates.map((template) => ({
       ...template,
@@ -3741,6 +3898,48 @@ async function loadProjectTaskTemplates(projectId) {
     await yieldToEventLoop();
   }
   return templates;
+}
+
+async function loadUnmaterializedProjectTaskTemplates(projectId, limit) {
+  const requestedLimit = Math.max(0, Math.floor(Number(limit) || 0));
+  if (!requestedLimit) return [];
+
+  const project = selectProjectByIdStmt.get(projectId);
+  if (!project) throw httpError(404, "项目不存在");
+  const packageIds = projectPackageIds(project);
+  if (!packageIds.length) return [];
+
+  const templates = db.prepare(`
+    SELECT
+      subject_task_templates.id,
+      subject_task_templates.subjectId,
+      subject_task_templates.sourceTaskId,
+      subject_task_templates.round,
+      subject_task_templates.criterion,
+      subject_task_templates.imageKey
+    FROM subject_task_templates
+    LEFT JOIN rating_tasks
+      ON rating_tasks.projectId = ?
+     AND rating_tasks.taskVersion = ?
+     AND rating_tasks.subjectId = subject_task_templates.subjectId
+     AND rating_tasks.round = subject_task_templates.round
+     AND rating_tasks.taskType = CASE
+       WHEN subject_task_templates.subjectId = ?
+         THEN 'dimension:' || subject_task_templates.criterion
+       ELSE 'dimension:' || subject_task_templates.criterion || ':project:' || ?
+     END
+     AND rating_tasks.imageKey = subject_task_templates.imageKey
+    WHERE subject_task_templates.subjectId IN (${placeholders(packageIds.length)})
+      AND rating_tasks.id IS NULL
+    ORDER BY subject_task_templates.selectionKey ASC,
+             subject_task_templates.id ASC
+    LIMIT ?
+  `).all(projectId, taskVersion, projectId, projectId, ...packageIds, requestedLimit);
+
+  return (await hydrateSubjectTaskTemplates(templates)).map((template) => ({
+    ...template,
+    packageId: template.subjectId,
+  }));
 }
 
 function insertTemplateTask(projectId, packageId, template) {
@@ -3753,8 +3952,9 @@ function insertTemplateTask(projectId, packageId, template) {
     subjectId: packageId,
     projectId,
     taskVersion,
-    round: 1,
+    round: Number(template.round || 1),
     taskType,
+    assignmentKey: crypto.randomInt(1, 2147483647),
     imageKey: template.imageKey,
     createdAt: now,
     updatedAt: now,
@@ -3783,6 +3983,44 @@ function parseTaskPagination(query = {}) {
 
 function hasPaginationQuery(query = {}) {
   return Object.hasOwn(query, "page") || Object.hasOwn(query, "pageSize");
+}
+
+function parseTaskCursor(value) {
+  if (!value) return null;
+  let parsed;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) : value;
+  } catch {
+    throw httpError(400, "浠诲姟鍒嗛〉游标格式不正确");
+  }
+  const taskType = String(parsed?.taskType ?? "");
+  const createdAt = String(parsed?.createdAt ?? "");
+  const id = String(parsed?.id ?? "");
+  const criterionOrder = Number(parsed?.criterionOrder);
+  if (!taskType || !createdAt || !id) {
+    throw httpError(400, "浠诲姟鍒嗛〉游标格式不正确");
+  }
+  return {
+    taskType,
+    createdAt,
+    id,
+    criterionOrder: Number.isFinite(criterionOrder) ? criterionOrder : null,
+  };
+}
+
+function serializeTaskCursor(row, criterionOrder = null) {
+  return JSON.stringify({
+    taskType: row.taskType,
+    createdAt: row.createdAt,
+    id: row.id,
+    ...(criterionOrder == null ? {} : { criterionOrder }),
+  });
+}
+
+function includeTaskTotal(query = {}) {
+  return ["1", "true", "yes"].includes(
+    String(query.includeTotal ?? "").toLowerCase(),
+  );
 }
 
 function escapeSqlLike(value) {
@@ -4056,24 +4294,61 @@ function listSubjectTaskOptions(projectId) {
 function listSubjectTasks(projectId, query = {}) {
   const { page, pageSize } = parseTaskPagination(query);
   const filter = buildSubjectTaskFilter(projectId, query);
-  const total = db
-    .prepare(`SELECT COUNT(*) AS total FROM rating_tasks ${filter.where}`)
-    .get(...filter.params).total;
+  const cursor = parseTaskCursor(query.cursor);
+  const cursorWhere = cursor
+    ? ` AND (
+         taskType > ?
+         OR (
+           taskType = ?
+           AND (
+             createdAt > ?
+             OR (createdAt = ? AND id > ?)
+           )
+         )
+       )`
+    : "";
+  const statusKey = ["pending", "assigned", "completed"].includes(query.status)
+    ? query.status
+    : "total";
+  const statsTotal =
+    !query.scorer && !query.criterion
+      ? getProjectTaskStats(projectId)[statusKey]
+      : null;
+  const total = statsTotal != null
+    ? statsTotal
+    : includeTaskTotal(query)
+      ? db
+        .prepare(`SELECT COUNT(*) AS total FROM rating_tasks ${filter.where}`)
+        .get(...filter.params).total
+      : null;
   const rows = db
     .prepare(
       `SELECT id, taskType, status, scorer, createdAt
        FROM rating_tasks
        ${filter.where}
+       ${cursorWhere}
        ORDER BY taskType ASC, createdAt ASC, id ASC
-       LIMIT ? OFFSET ?`,
+       LIMIT ?${cursor ? "" : " OFFSET ?"}`,
     )
-    .all(...filter.params, pageSize, (page - 1) * pageSize);
+    .all(
+      ...filter.params,
+      ...(cursor
+        ? [cursor.taskType, cursor.taskType, cursor.createdAt, cursor.createdAt, cursor.id]
+        : []),
+      pageSize + 1,
+      ...(cursor ? [] : [(page - 1) * pageSize]),
+    );
+  const hasMore = rows.length > pageSize;
+  const pageRows = rows.slice(0, pageSize);
+  const lastRow = pageRows[pageRows.length - 1];
 
   return {
     total,
     page,
     pageSize,
-    tasks: hydrateTaskListRows(rows).map((row) => ({
+    hasMore,
+    nextCursor: hasMore && lastRow ? serializeTaskCursor(lastRow) : null,
+    tasks: hydrateTaskListRows(pageRows).map((row) => ({
       id: row.id,
       criterion: row.taskType.split(":")[1] || null,
       status: row.status,
@@ -4153,6 +4428,9 @@ function addReportSheet(workbook, name, headers, rows, widths) {
 }
 
 function getSubjectTaskReportSummary(subjectId) {
+  const cached = subjectTaskReportCache.get(subjectId);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
   const project = getProjectOrThrow(subjectId);
   const packageIds = projectPackageIds(project);
 
@@ -4164,19 +4442,12 @@ function getSubjectTaskReportSummary(subjectId) {
        WHERE subjectId IN (${placeholders(packageIds.length)})`,
     )
     .get(...packageIds);
-  const statusRows = db
-    .prepare(
-      `SELECT status, COUNT(*) AS count
-       FROM rating_tasks
-       WHERE projectId = ? AND taskVersion = ?
-       GROUP BY status`,
-    )
-    .all(subjectId, taskVersion);
-  const statusCounts = { pending: 0, assigned: 0, completed: 0 };
-  statusRows.forEach((row) => {
-    if (Object.hasOwn(statusCounts, row.status))
-      statusCounts[row.status] = row.count;
-  });
+  const taskStats = getProjectTaskStats(subjectId);
+  const statusCounts = {
+    pending: taskStats.pending,
+    assigned: taskStats.assigned,
+    completed: taskStats.completed,
+  };
 
   const dimensionRows = db
     .prepare(
@@ -4245,10 +4516,7 @@ function getSubjectTaskReportSummary(subjectId) {
     if (item) item.criteria.add(String(row.taskType || "").split(":")[1] || "");
   });
 
-  const totalTasks = Object.values(statusCounts).reduce(
-    (sum, count) => sum + count,
-    0,
-  );
+  const totalTasks = taskStats.total;
   const completedTasks = statusCounts.completed;
   const dimensions = [...dimensionMap.values()].map((item) => ({
     ...item,
@@ -4272,7 +4540,7 @@ function getSubjectTaskReportSummary(subjectId) {
         item.averageDurationMs == null ? null : item.averageDurationMs / 1000,
     }));
 
-  return {
+  const report = {
     subject: { _id: project._id, name: project.name },
     imageCount: imageStats.imageCount,
     categoryCount: imageStats.categoryCount,
@@ -4287,6 +4555,11 @@ function getSubjectTaskReportSummary(subjectId) {
     dimensions,
     scorers,
   };
+  subjectTaskReportCache.set(subjectId, {
+    value: report,
+    expiresAt: Date.now() + subjectTaskReportCacheTtlMs,
+  });
+  return report;
 }
 
 async function exportSubjectTaskReport(subjectId, res) {
@@ -4468,30 +4741,64 @@ function taskCriterionOrderSql(column) {
 function listAssignedTasks(query = {}) {
   const filter = buildScorerTaskFilter(query);
   const { page, pageSize } = parseTaskPagination(query);
-  const total = db
-    .prepare(`SELECT COUNT(*) AS total FROM rating_tasks ${filter.where}`)
-    .get(...filter.params).total;
   const criterionOrder = taskCriterionOrderSql("rating_tasks.taskType");
+  const cursor = parseTaskCursor(query.cursor);
+  const cursorOrder = cursor?.criterionOrder;
+  const useCursor = Boolean(cursor && cursorOrder != null);
+  const cursorWhere = useCursor
+    ? ` AND (
+         (${criterionOrder}) > ?
+         OR (
+           (${criterionOrder}) = ?
+           AND (
+             rating_tasks.createdAt > ?
+             OR (rating_tasks.createdAt = ? AND rating_tasks.id > ?)
+           )
+         )
+       )`
+    : "";
+  const total = includeTaskTotal(query)
+    ? db
+      .prepare(`SELECT COUNT(*) AS total FROM rating_tasks ${filter.where}`)
+      .get(...filter.params).total
+    : null;
   const rows = db
     .prepare(
       `SELECT rating_tasks.id, rating_tasks.subjectId, rating_tasks.projectId,
               rating_tasks.taskType, rating_tasks.status,
+              rating_tasks.createdAt,
+              ${criterionOrder} AS criterionOrder,
               projects.name AS subjectName
        FROM rating_tasks
        JOIN projects ON projects.id = rating_tasks.projectId
        ${filter.where}
+       ${cursorWhere}
        ORDER BY ${criterionOrder} ASC,
                 rating_tasks.createdAt ASC,
                 rating_tasks.id ASC
-       LIMIT ? OFFSET ?`,
+       LIMIT ?${useCursor ? "" : " OFFSET ?"}`,
     )
-    .all(...filter.params, pageSize, (page - 1) * pageSize);
+    .all(
+      ...filter.params,
+      ...(!useCursor
+        ? []
+        : [cursorOrder, cursorOrder, cursor.createdAt, cursor.createdAt, cursor.id]),
+      pageSize + 1,
+      ...(useCursor ? [] : [(page - 1) * pageSize]),
+    );
+  const hasMore = rows.length > pageSize;
+  const pageRows = rows.slice(0, pageSize);
+  const lastRow = pageRows[pageRows.length - 1];
 
   return {
     total,
     page,
     pageSize,
-    tasks: hydrateTaskListRows(rows).map((row) => ({
+    hasMore,
+    nextCursor: hasMore && lastRow
+      ? serializeTaskCursor(lastRow, Number(lastRow.criterionOrder))
+      : null,
+    tasks: hydrateTaskListRows(pageRows).map((row) => ({
       id: row.id,
       subjectId: row.projectId || row.subjectId,
       projectId: row.projectId || row.subjectId,
@@ -4630,14 +4937,7 @@ function parseTaskRanking(
   return ranking;
 }
 
-function parseTaskRankingRelations(value, ranking, taskType = "") {
-  const criterion = String(taskType || "").split(":")[1] || "";
-  if (taskCorrectnessCriteria.has(criterion)) {
-    if (value === undefined || value === null || (Array.isArray(value) && value.length === 0)) {
-      return [];
-    }
-    throw httpError(400, "文字和肢体正确性不支持排序关系");
-  }
+function parseTaskRankingRelations(value, ranking) {
   const expectedLength = Math.max(ranking.length - 1, 0);
   if (value === undefined || value === null) {
     return Array.from({ length: expectedLength }, () => ">");
@@ -4711,7 +5011,6 @@ function completeAssignedTask(taskId, body = {}) {
   const rankingRelations = parseTaskRankingRelations(
     body.rankingRelations,
     ranking,
-    task.taskType,
   );
   const durationMs = parseTaskDuration(body.durationMs);
   const rankingActionCount = parseRankingActionCount(body.rankingActionCount);
@@ -4743,13 +5042,12 @@ function completeAssignedTask(taskId, body = {}) {
     if (result.changes === 0)
       throw httpError(409, "任务状态已变更，请刷新后重试");
 
-    const remaining = selectRemainingSubjectTaskCountStmt.get(
-      task.projectId || task.subjectId,
-      taskVersion,
-    ).total;
+    const projectId = task.projectId || task.subjectId;
+    const taskStats = getProjectTaskStats(projectId);
+    const remaining = taskStats.pending + taskStats.assigned;
     if (remaining === 0) {
       updateSubjectTaskStatusStmt.run({
-        id: task.projectId || task.subjectId,
+        id: projectId,
         taskStatus: "task_completed",
         updatedAt: completedAt,
       });
@@ -4757,6 +5055,7 @@ function completeAssignedTask(taskId, body = {}) {
 
     const updated = selectTaskByIdStmt.get(task.id);
     db.exec("COMMIT");
+    invalidateTaskSummaryCaches(projectId);
     return hydrateTaskRows([updated])[0];
   } catch (error) {
     try {
@@ -4799,7 +5098,6 @@ function updateCompletedTask(taskId, body = {}) {
   const rankingRelations = parseTaskRankingRelations(
     body.rankingRelations,
     ranking,
-    task.taskType,
   );
   parseTaskDuration(body.durationMs);
   const rankingActionCount = parseRankingActionCount(body.rankingActionCount);
@@ -4830,6 +5128,7 @@ function updateCompletedTask(taskId, body = {}) {
 
     const updated = selectTaskByIdStmt.get(task.id);
     db.exec("COMMIT");
+    invalidateTaskSummaryCaches(task.projectId || task.subjectId);
     return hydrateTaskRows([updated])[0];
   } catch (error) {
     try {
@@ -5032,13 +5331,11 @@ async function parseTaskAllocationWorkbook(file) {
 
 function getTaskReassignmentOptions(subjectId) {
   getProjectOrThrow(subjectId);
+  const stats = getProjectTaskStats(subjectId);
 
   return {
     users: selectAvailableSubjectScorersStmt.all(subjectId).map(userDto),
-    availableTaskCount: selectReassignableTaskCountStmt.get(
-      subjectId,
-      taskVersion,
-    ).total,
+    availableTaskCount: stats.pending,
     sourceScorers: selectSubjectAssignedScorerCountsStmt
       .all(subjectId, taskVersion)
       .map((row) => ({ username: row.scorer, taskCount: row.taskCount })),
@@ -5076,8 +5373,8 @@ function reassignSubjectTasks(subjectId, body = {}) {
   }
 
   const availableTaskCount = source === "assigned_uncompleted"
-    ? selectReassignableTaskCountStmt.get(subjectId, taskVersion).total
-    : selectAssignedReassignableTaskCountStmt.get(subjectId, taskVersion).total;
+    ? getProjectTaskStats(subjectId).pending
+    : getProjectTaskStats(subjectId).assigned;
   let assignmentPlan = null;
   if (source === "assigned_uncompleted") {
     if (!Array.isArray(body.allocations)) {
@@ -5118,15 +5415,13 @@ function reassignSubjectTasks(subjectId, body = {}) {
     const candidates = selectReassignableTaskIdsStmt.all(
       subjectId,
       taskVersion,
+      taskCount,
     );
     if (taskCount > candidates.length) {
       throw httpError(400, `任务数量不能超过 ${candidates.length}`);
     }
 
-    selectedTasks = seededShuffle(
-      candidates,
-      `${subjectId}|reassign|${crypto.randomUUID()}`,
-    ).slice(0, taskCount);
+    selectedTasks = candidates;
   } else {
     const sourceScorers = [
       ...new Set(
@@ -5162,6 +5457,7 @@ function reassignSubjectTasks(subjectId, body = {}) {
         subjectId,
         taskVersion,
         scorer,
+        taskCount,
       );
       if (taskCount > candidates.length) {
         throw httpError(
@@ -5169,10 +5465,7 @@ function reassignSubjectTasks(subjectId, body = {}) {
           `打分人 ${scorer} 的未完成任务不足 ${taskCount} 个`,
         );
       }
-      return seededShuffle(
-        candidates,
-        `${subjectId}|reassign|${scorer}|${crypto.randomUUID()}`,
-      ).slice(0, taskCount);
+      return candidates;
     });
   }
 
@@ -5217,6 +5510,7 @@ function reassignSubjectTasks(subjectId, body = {}) {
     throw error;
   }
 
+  invalidateTaskSummaryCaches(subjectId);
   return {
     reassignedCount: selectedTasks.length,
     remainingTaskCount: availableTaskCount - selectedTasks.length,
@@ -5231,22 +5525,23 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
   );
   if (!requestedTaskCount) return 0;
 
-  const pendingTasks = selectPendingProjectTaskIdsStmt.all(projectId, taskVersion);
+  const pendingTasks = selectPendingProjectTaskIdsStmt.all(
+    projectId,
+    taskVersion,
+    requestedTaskCount,
+  );
   if (requestedTaskCount > pendingTasks.length) {
     throw httpError(400, `分配数量不能超过 ${pendingTasks.length} 个可用任务`);
   }
 
-  const shuffledTasks = seededShuffle(
-    pendingTasks,
-    `${projectId}|assign|${crypto.randomUUID()}`,
-  ).slice(0, requestedTaskCount);
+  const selectedTasks = pendingTasks;
   const assigneePlan = allocations.flatMap(({ scorer, taskCount }) =>
     Array.from({ length: taskCount }, () => scorer),
   );
   const updatedAt = nowIso();
 
-  for (let start = 0; start < shuffledTasks.length; start += TASK_ASSIGN_BATCH_SIZE) {
-    const batch = shuffledTasks.slice(start, start + TASK_ASSIGN_BATCH_SIZE);
+  for (let start = 0; start < selectedTasks.length; start += TASK_ASSIGN_BATCH_SIZE) {
+    const batch = selectedTasks.slice(start, start + TASK_ASSIGN_BATCH_SIZE);
     db.exec("BEGIN IMMEDIATE");
     try {
       const whenClauses = batch.map(() => "WHEN ? THEN ?");
@@ -5277,11 +5572,12 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
       throw error;
     }
     const processed = start + batch.length;
-    onProgress?.(processed, shuffledTasks.length);
-    if (processed < shuffledTasks.length) await yieldToEventLoop();
+    onProgress?.(processed, selectedTasks.length);
+    if (processed < selectedTasks.length) await yieldToEventLoop();
   }
 
-  return shuffledTasks.length;
+  invalidateTaskSummaryCaches(projectId);
+  return selectedTasks.length;
 }
 
 function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus) {
@@ -5315,10 +5611,6 @@ function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus) {
 
 async function generateSubjectTasks(projectId, assignment, onProgress) {
   const project = getProjectOrThrow(projectId);
-  const templates = await loadProjectTaskTemplates(projectId);
-  if (!templates.length) {
-    throw httpError(409, "关联图包未提供 tasks.json，无法创建任务");
-  }
   const requestedTaskCount = assignment.allocations.reduce(
     (total, allocation) => total + allocation.taskCount,
     0,
@@ -5326,31 +5618,38 @@ async function generateSubjectTasks(projectId, assignment, onProgress) {
   if (!requestedTaskCount) {
     throw httpError(400, "请至少为一名打分人分配任务");
   }
-  if (requestedTaskCount > templates.length) {
-    throw httpError(400, `分配数量不能超过 ${templates.length} 个模板任务`);
-  }
   const previousTaskStatus = project.taskStatus;
   const generatedTaskIds = [];
 
   try {
-  let createdCount = 0;
-  let assignedCount = 0;
-  onProgress?.({ stage: "正在导入任务模板", progress: 5 });
+    let createdCount = 0;
+    let assignedCount = 0;
+    const pendingBefore = getProjectTaskStats(projectId).pending;
+    const templatesNeeded = Math.max(0, requestedTaskCount - pendingBefore);
+    const templates = templatesNeeded
+      ? await loadUnmaterializedProjectTaskTemplates(projectId, templatesNeeded)
+      : [];
 
-  for (let start = 0; start < templates.length; start += TASK_WRITE_BATCH_SIZE) {
+    if (templates.length < templatesNeeded) {
+      const availableTaskCount = pendingBefore + templates.length;
+      throw httpError(400, `本次最多还能下发 ${availableTaskCount} 个任务`);
+    }
+
+    onProgress?.({
+      stage: templatesNeeded ? "正在生成本次任务" : "正在分配已生成任务",
+      progress: templatesNeeded ? 5 : 70,
+    });
+
+    for (let start = 0; start < templates.length; start += TASK_WRITE_BATCH_SIZE) {
       const batch = templates.slice(start, start + TASK_WRITE_BATCH_SIZE);
       db.exec("BEGIN IMMEDIATE");
       try {
-        for (let index = 0; index < batch.length; index++) {
-          const template = batch[index];
+        for (const template of batch) {
           const taskId = insertTemplateTask(projectId, template.packageId, template);
           if (taskId) {
             createdCount++;
             generatedTaskIds.push(taskId);
           }
-          // DatabaseSync is synchronous. Yield periodically so status polling
-          // and health requests remain responsive during large generations.
-          if ((index + 1) % 100 === 0) await yieldToEventLoop();
         }
         db.exec("COMMIT");
       } catch (error) {
@@ -5360,40 +5659,42 @@ async function generateSubjectTasks(projectId, assignment, onProgress) {
         throw error;
       }
       onProgress?.({
-        stage: "正在导入任务模板",
+        stage: "正在生成本次任务",
         progress: 5 + Math.round((Math.min(start + batch.length, templates.length) / templates.length) * 70),
       });
       if (start + batch.length < templates.length) await yieldToEventLoop();
-  }
+    }
 
-  onProgress?.({ stage: "正在按配额分配任务", progress: 75 });
-  assignedCount = await assignGeneratedTasks(
-    projectId,
-    assignment.allocations,
-    (current, total) => onProgress?.({
-      stage: "正在按配额分配任务",
-      progress: 75 + (total ? Math.round((current / total) * 23) : 0),
-    }),
-  );
+    onProgress?.({ stage: "正在按配额分配任务", progress: 75 });
+    assignedCount = await assignGeneratedTasks(
+      projectId,
+      assignment.allocations,
+      (current, total) => onProgress?.({
+        stage: "正在按配额分配任务",
+        progress: 75 + (total ? Math.round((current / total) * 23) : 0),
+      }),
+    );
 
-  syncProjectTeams(projectId, assignment.teamIds, nowIso());
-  updateSubjectTaskStatusStmt.run({
-    id: projectId,
-    taskStatus: "scoring",
-    updatedAt: nowIso(),
-  });
-  const updatedProject = selectProjectByIdStmt.get(projectId);
-  const taskCount = selectCurrentTaskCountStmt.get(projectId, taskVersion).total;
-  onProgress?.({ stage: "任务生成完成", progress: 100 });
+    syncProjectTeams(projectId, assignment.teamIds, nowIso());
+    updateSubjectTaskStatusStmt.run({
+      id: projectId,
+      taskStatus: "scoring",
+      updatedAt: nowIso(),
+    });
+    const updatedProject = selectProjectByIdStmt.get(projectId);
+    const taskStats = getProjectTaskStats(projectId);
+    const taskCount = taskStats.total;
+    const unassignedCount = taskStats.pending;
+    onProgress?.({ stage: "任务生成完成", progress: 100 });
 
-  return {
-    project: projectDto(updatedProject),
-    taskCount,
-    createdCount,
-    assignedCount,
-    unassignedCount: taskCount - assignedCount,
-    taskVersion,
-  };
+    return {
+      project: projectDto(updatedProject, taskStats),
+      taskCount,
+      createdCount,
+      assignedCount,
+      unassignedCount,
+      taskVersion,
+    };
   } catch (error) {
     rollbackGeneratedTasks(projectId, generatedTaskIds, previousTaskStatus);
     throw error;
@@ -5402,8 +5703,8 @@ async function generateSubjectTasks(projectId, assignment, onProgress) {
 
 function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
   const project = getProjectOrThrow(subjectId);
-  if (project.taskStatus !== "task_pending") {
-    throw httpError(409, "当前项目已开始任务，不能重复创建");
+  if (!["task_pending", "scoring"].includes(project.taskStatus)) {
+    throw httpError(409, "当前项目已完成任务，不能继续下发");
   }
   const assignment = parseTaskGenerationAssignees(assigneesInput);
 
@@ -6110,9 +6411,10 @@ app.get(
 app.get("/api/projects/:id/tasks", requireAdmin, async (req, res, next) => {
   try {
     const project = getProjectOrThrow(req.params.id);
+    const projectView = projectDto(project);
     res.json({
-      subject: projectSubjectDto(project),
-      project: projectDto(project),
+      subject: projectSubjectDto(project, projectView),
+      project: projectView,
       ...listSubjectTasks(req.params.id, req.query),
     });
   } catch (error) {
@@ -6220,9 +6522,10 @@ app.get(
 app.get("/api/subjects/:id/tasks", requireAdmin, async (req, res, next) => {
   try {
     const project = getProjectOrThrow(req.params.id);
+    const projectView = projectDto(project);
     res.json({
-      subject: projectSubjectDto(project),
-      project: projectDto(project),
+      subject: projectSubjectDto(project, projectView),
+      project: projectView,
       ...listSubjectTasks(req.params.id, req.query),
     });
   } catch (error) {
