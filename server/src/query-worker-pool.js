@@ -200,9 +200,16 @@ export function createQueryWorkerPool(options = {}) {
 
   function invalidate(operations = []) {
     cacheEpoch += 1;
-    if (!operations.length) return cache.clear();
+    if (!operations.length) {
+      cache.clear();
+      inflight.clear();
+      return;
+    }
     for (const key of cache.keys()) {
       if (operations.some((operation) => key.startsWith(`${operation}:`))) cache.delete(key);
+    }
+    for (const key of inflight.keys()) {
+      if (operations.some((operation) => key.startsWith(`${operation}:`))) inflight.delete(key);
     }
   }
 

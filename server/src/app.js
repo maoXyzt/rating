@@ -5840,6 +5840,10 @@ function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
     },
   );
   job.worker = worker;
+  const invalidateGenerationCaches = () => {
+    invalidateTaskSummaryCaches(subjectId);
+    invalidateScorerQueryCaches();
+  };
   worker.on("message", (message) => {
     if (message?.type === "progress") {
       job.status = "running";
@@ -5848,6 +5852,7 @@ function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
       return;
     }
     if (message?.type === "completed") {
+      invalidateGenerationCaches();
       job.result = message.result;
       job.status = "completed";
       job.stage = "任务导入完成";
@@ -5856,6 +5861,7 @@ function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
       return;
     }
     if (message?.type === "failed") {
+      invalidateGenerationCaches();
       job.status = "failed";
       job.stage = "任务导入失败";
       job.message = message.message || "任务导入失败，请重试";
@@ -5864,6 +5870,7 @@ function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
   });
   worker.on("error", (error) => {
     if (["queued", "running"].includes(job.status)) {
+      invalidateGenerationCaches();
       job.status = "failed";
       job.stage = "任务导入失败";
       job.message = error.message || "任务生成进程启动失败";
@@ -5872,6 +5879,7 @@ function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
   });
   worker.on("exit", (code) => {
     if (["queued", "running"].includes(job.status)) {
+      invalidateGenerationCaches();
       job.status = "failed";
       job.stage = "任务导入失败";
       job.message = `任务生成进程异常退出（code ${code}）`;
