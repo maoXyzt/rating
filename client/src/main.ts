@@ -6,49 +6,36 @@ import AppLayout from './layouts/AppLayout.vue';
 import { clearCurrentUser, currentUser, defaultRouteForUser, setCurrentUser } from './composables/auth';
 import { authApi } from './services/auth';
 import { setUnauthorizedHandler } from './services/http';
-import RatingView from './views/RatingView.vue';
-import LoginView from './views/LoginView.vue';
 import AdminLayout from './layouts/AdminLayout.vue';
-import AdminDashboardView from './views/AdminDashboardView.vue';
-import AdminProjectView from './views/AdminProjectView.vue';
-import AdminProjectsView from './views/AdminProjectsView.vue';
-import AdminSubjectView from './views/AdminSubjectView.vue';
-import AdminTaskView from './views/AdminTaskView.vue';
-import AdminTaskManagerView from './views/AdminTaskManagerView.vue';
-import AdminScoringView from './views/AdminScoringView.vue';
-import AdminAccountView from './views/AdminAccountView.vue';
-import AdminTeamsView from './views/AdminTeamsView.vue';
-import FeedbackView from './views/FeedbackView.vue';
-import AdminFeedbackView from './views/AdminFeedbackView.vue';
 import './style.css';
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/login', component: LoginView, meta: { public: true } },
+    { path: '/login', component: () => import('./views/LoginView.vue'), meta: { public: true } },
     {
       path: '/',
       component: AdminLayout,
       children: [
-        { path: '', component: RatingView },
+        { path: '', component: () => import('./views/RatingView.vue') },
         { path: 'tasks', redirect: '/' },
-        { path: 'feedbacks', component: FeedbackView }
+        { path: 'feedbacks', component: () => import('./views/FeedbackView.vue') }
       ]
     },
     {
       path: '/admin',
       component: AdminLayout,
       children: [
-        { path: '', component: AdminDashboardView },
-        { path: 'packages', component: AdminProjectView },
-        { path: 'projects', component: AdminProjectsView },
-        { path: 'tasks', component: AdminTaskManagerView },
-        { path: 'scoring', component: AdminScoringView },
-        { path: 'accounts', component: AdminAccountView },
-        { path: 'teams', component: AdminTeamsView },
-        { path: 'feedbacks', component: AdminFeedbackView },
-        { path: 'projects/:subjectId/tasks', component: AdminTaskView, alias: 'subjects/:subjectId/tasks' },
-        { path: 'packages/:subjectId', component: AdminSubjectView, alias: ['subjects/:subjectId', 'projects/:subjectId/images'] }
+        { path: '', component: () => import('./views/AdminDashboardView.vue') },
+        { path: 'packages', component: () => import('./views/AdminProjectView.vue') },
+        { path: 'projects', component: () => import('./views/AdminProjectsView.vue') },
+        { path: 'tasks', component: () => import('./views/AdminTaskManagerView.vue') },
+        { path: 'scoring', component: () => import('./views/AdminScoringView.vue') },
+        { path: 'accounts', component: () => import('./views/AdminAccountView.vue') },
+        { path: 'teams', component: () => import('./views/AdminTeamsView.vue') },
+        { path: 'feedbacks', component: () => import('./views/AdminFeedbackView.vue') },
+        { path: 'projects/:subjectId/tasks', component: () => import('./views/AdminTaskView.vue'), alias: 'subjects/:subjectId/tasks' },
+        { path: 'packages/:subjectId', component: () => import('./views/AdminSubjectView.vue'), alias: ['subjects/:subjectId', 'projects/:subjectId/images'] }
       ]
     }
   ]

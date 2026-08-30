@@ -87,12 +87,15 @@ export function createAdminDashboardService({
        WHERE taskVersion = ?) AS pendingTaskCount,
       (SELECT COALESCE(SUM(completed), 0)
        FROM project_task_stats
-       WHERE taskVersion = ?) AS completedTaskCount,
-      (SELECT AVG(durationMs)
-       FROM rating_tasks
-       WHERE taskVersion = ?
-         AND status = 'completed'
-         AND durationMs >= 0) AS averageDurationMs
+       WHERE taskVersion = ?) AS completedTaskCount
+  `);
+
+  const selectAdminDashboardAverageDurationStmt = db.prepare(`
+    SELECT AVG(durationMs) AS averageDurationMs
+    FROM rating_tasks
+    WHERE taskVersion = ?
+      AND status = 'completed'
+      AND durationMs >= 0
   `);
 
   function parseDashboardProjectIds(query = {}) {
@@ -481,7 +484,6 @@ export function createAdminDashboardService({
         taskVersion,
         taskVersion,
         taskVersion,
-        taskVersion,
       );
       return {
         projectCount: Number(stats.projectCount || 0),
@@ -493,7 +495,6 @@ export function createAdminDashboardService({
         assignedTaskCount: Number(stats.assignedTaskCount || 0),
         pendingTaskCount: Number(stats.pendingTaskCount || 0),
         completedTaskCount: Number(stats.completedTaskCount || 0),
-        averageDurationSeconds: stats.averageDurationMs == null ? null : stats.averageDurationMs / 1000,
       };
     });
   }
@@ -509,9 +510,21 @@ export function createAdminDashboardService({
   }
 
   function getDashboardCharts() {
-    return cachedDashboardValue("charts", () => ({
-      peakHours: listDashboardPeakHours(),
-    }));
+    return cachedDashboardValue("charts", () => {
+      return {
+        peakHours: listDashboardPeakHours(),
+      };
+    });
+  }
+
+  function getDashboardAverageDuration() {
+    return cachedDashboardValue("average-duration", () => {
+      const duration = selectAdminDashboardAverageDurationStmt.get(taskVersion);
+      return {
+        averageDurationSeconds:
+          duration.averageDurationMs == null ? null : duration.averageDurationMs / 1000,
+      };
+    });
   }
 
   function getDashboardWorkloadSection(query = {}) {
@@ -744,12 +757,15 @@ export function createAdminDashboardService({
     const { page, pageSize } = parseTaskPagination(query);
     const stats = getDashboardStats();
     const projectSection = getDashboardProjectSection(query);
+    const charts = getDashboardCharts();
+    const averageDuration = getDashboardAverageDuration();
     const workloadSummary = getDashboardWorkloadSection(query);
 
     return {
       ...stats,
       ...projectSection,
-      peakHours: getDashboardCharts().peakHours,
+      peakHours: charts.peakHours,
+      averageDurationSeconds: averageDuration.averageDurationSeconds,
       progressSummary: getDashboardProgressSummary(),
       workloadSummary,
       total: stats.completedTaskCount,
@@ -929,6 +945,7 @@ export function createAdminDashboardService({
     getDashboardStats,
     getDashboardProjectSection,
     getDashboardCharts,
+    getDashboardAverageDuration,
     getDashboardWorkloadSection,
     exportCompletedTasks,
     exportScorerTaskSummary,

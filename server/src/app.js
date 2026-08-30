@@ -4149,6 +4149,7 @@ const {
   getDashboardStats,
   getDashboardProjectSection,
   getDashboardCharts,
+  getDashboardAverageDuration,
   getDashboardWorkloadSection,
   exportCompletedTasks,
   exportScorerTaskSummary,
@@ -5928,6 +5929,14 @@ app.get("/api/admin/dashboard/project-summary", async (req, res, next) => {
 app.get("/api/admin/dashboard/charts", async (req, res, next) => {
   try {
     res.json(getDashboardCharts());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/admin/dashboard/average-duration", async (req, res, next) => {
+  try {
+    res.json(getDashboardAverageDuration());
   } catch (error) {
     next(error);
   }

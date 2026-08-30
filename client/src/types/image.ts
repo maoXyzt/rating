@@ -481,11 +481,11 @@ export type AdminDashboardStats = Pick<AdminDashboard,
   'unassignedTaskCount' |
   'assignedTaskCount' |
   'pendingTaskCount' |
-  'completedTaskCount' |
-  'averageDurationSeconds'
+  'completedTaskCount'
 >;
 export type AdminDashboardProjectSection = Pick<AdminDashboard, 'selectedProjectId' | 'projectSummary'>;
 export type AdminDashboardCharts = Pick<AdminDashboard, 'peakHours'>;
+export type AdminDashboardAverageDuration = Pick<AdminDashboard, 'averageDurationSeconds'>;
 export type AdminDashboardWorkloadSection = AdminDashboard['workloadSummary'];
 
 export interface ScorerDashboard {

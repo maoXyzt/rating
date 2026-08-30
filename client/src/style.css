@@ -958,6 +958,16 @@ body {
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
 }
 
+.admin-dashboard-stat-card.is-clickable {
+  cursor: pointer;
+}
+
+.admin-dashboard-stat-card.is-clickable:hover,
+.admin-dashboard-stat-card.is-clickable:focus-visible {
+  border-color: var(--primary-color);
+  outline: none;
+}
+
 :root[data-theme="dark"] .admin-dashboard-stat-card {
   background: linear-gradient(180deg, rgba(30, 41, 59, 0.7), var(--surface-bg));
   box-shadow: none;
