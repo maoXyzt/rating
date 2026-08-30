@@ -3238,6 +3238,7 @@ function deleteProject(id) {
     }
     db.exec("COMMIT");
     invalidateTaskSummaryCaches(project._id);
+    invalidateScorerQueryCaches();
     return { deleted: true, deletedTaskCount };
   } catch (error) {
     try {
@@ -3283,6 +3284,7 @@ async function deleteQueuedSubject(subjectId) {
     try {
       deleteQueuedSubjectStmt.run(subjectId);
       db.exec("COMMIT");
+      invalidateScorerQueryCaches();
     } catch (error) {
       try {
         db.exec("ROLLBACK");
@@ -4244,6 +4246,7 @@ const adminScoringService = createAdminScoringService({
   nowIso,
   parseProjectId,
   parseTaskPagination,
+  onTasksChanged: () => invalidateScorerQueryCaches(),
 });
 const {
   listScoringSummary,
@@ -4801,6 +4804,11 @@ function invalidateAssignedTaskListCache() {
   assignedTaskListCache.clear();
 }
 
+function invalidateScorerQueryCaches() {
+  invalidateAssignedTaskListCache();
+  queryWorkerPool?.invalidate(["assignedTasks", "scorerDashboard"]);
+}
+
 function listAssignedTasks(query = {}) {
   const cacheKey = JSON.stringify({
     scorer: query.scorer || null,
@@ -5154,8 +5162,7 @@ function completeAssignedTask(taskId, body = {}) {
   }
 
   invalidateTaskSummaryCaches(projectId);
-  invalidateAssignedTaskListCache();
-  queryWorkerPool?.invalidate(["assignedTasks", "scorerDashboard"]);
+  invalidateScorerQueryCaches();
   queueProjectTaskSummary(projectId);
   const updated = selectTaskByIdStmt.get(task.id);
   return hydrateTaskRows([updated])[0];
@@ -5231,8 +5238,7 @@ function updateCompletedTask(taskId, body = {}) {
   }
 
   invalidateTaskSummaryCaches(task.projectId || task.subjectId);
-  invalidateAssignedTaskListCache();
-  queryWorkerPool?.invalidate(["assignedTasks", "scorerDashboard"]);
+  invalidateScorerQueryCaches();
   const updated = selectTaskByIdStmt.get(task.id);
   return hydrateTaskRows([updated])[0];
 }
@@ -5610,6 +5616,7 @@ function reassignSubjectTasks(subjectId, body = {}) {
   }
 
   invalidateTaskSummaryCaches(subjectId);
+  invalidateScorerQueryCaches();
   return {
     reassignedCount: selectedTasks.length,
     remainingTaskCount: availableTaskCount - selectedTasks.length,
@@ -5676,6 +5683,7 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
   }
 
   invalidateTaskSummaryCaches(projectId);
+  invalidateScorerQueryCaches();
   return selectedTasks.length;
 }
 
@@ -5703,6 +5711,7 @@ function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus) {
       taskStatus: previousTaskStatus,
       updatedAt: nowIso(),
     });
+    invalidateScorerQueryCaches();
   } catch (cleanupError) {
     console.error(`Failed to roll back generated tasks for ${projectId}`, cleanupError);
   }

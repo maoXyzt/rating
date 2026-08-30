@@ -54,7 +54,7 @@ export function createQueryWorkerPool(options = {}) {
         imageSelectColumns: options.imageSelectColumns || "*",
       },
     });
-    const slot = { index, worker, busy: false, requestId: null };
+    const slot = { index, worker, busy: false, retiring: false, requestId: null };
     workers[index] = slot;
     worker.on("online", drain);
     worker.on("message", (message) => finish(slot, message));
@@ -74,6 +74,7 @@ export function createQueryWorkerPool(options = {}) {
     clearTimeout(request.timer);
     pending.delete(slot.requestId);
     slot.busy = false;
+    slot.retiring = true;
     slot.requestId = null;
     request.reject(error);
     slot.worker.terminate().catch(() => {});
@@ -86,6 +87,7 @@ export function createQueryWorkerPool(options = {}) {
     clearTimeout(request.timer);
     pending.delete(slot.requestId);
     slot.busy = false;
+    slot.retiring = false;
     slot.requestId = null;
     if (message.ok) {
       const ttl = ttlByOperation[request.operation] || 0;
@@ -113,6 +115,7 @@ export function createQueryWorkerPool(options = {}) {
     if (!request) return;
     pending.delete(requestId);
     slot.busy = false;
+    slot.retiring = true;
     slot.requestId = null;
     request.reject(new QueryTimeoutError());
     slot.worker.terminate().catch(() => {});
@@ -128,7 +131,7 @@ export function createQueryWorkerPool(options = {}) {
   }
 
   function drain() {
-    workers.filter(Boolean).filter((slot) => !slot.busy).forEach((slot) => {
+    workers.filter(Boolean).filter((slot) => !slot.busy && !slot.retiring).forEach((slot) => {
       const request = queue.shift();
       if (request) dispatch(slot, request);
     });
@@ -141,7 +144,7 @@ export function createQueryWorkerPool(options = {}) {
     if (cached) cache.delete(key);
     const existing = inflight.get(key);
     if (existing) return existing;
-    if (queue.length >= MAX_QUEUE && !workers.some((slot) => slot && !slot.busy)) {
+    if (queue.length >= MAX_QUEUE && !workers.some((slot) => slot && !slot.busy && !slot.retiring)) {
       return Promise.reject(new QueryOverloadedError());
     }
     const promise = new Promise((resolve, reject) => {

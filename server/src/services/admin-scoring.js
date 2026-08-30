@@ -151,6 +151,7 @@ export function createAdminScoringService({
   nowIso,
   parseProjectId,
   parseTaskPagination,
+  onTasksChanged,
 }) {
   const rollbackJobs = new Map();
   const activeRollbackJobsByKey = new Map();
@@ -509,6 +510,7 @@ export function createAdminScoringService({
     }
 
     if (!changed) throw httpError(409, "任务状态已变化，请重新预览后再回退");
+    onTasksChanged?.();
     return {
       ...rollbackPreviewDto(analysis),
       rolledBackTaskCount: changed,
