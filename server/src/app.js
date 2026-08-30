@@ -4798,6 +4798,7 @@ function listAssignedTasks(query = {}) {
     status: query.status || null,
     criterion: query.criterion || null,
     summaryOnly: query.summaryOnly || null,
+    includeTotal: includeTaskTotal(query),
   });
   const cached = assignedTaskListCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
