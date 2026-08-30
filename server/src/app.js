@@ -2622,7 +2622,11 @@ function invalidateTaskSummaryCaches(projectId) {
   subjectTaskReportCache.delete(projectId);
 }
 
+const queuedProjectTaskSummaries = new Set();
+
 function queueProjectTaskSummary(projectId) {
+  if (queuedProjectTaskSummaries.has(projectId)) return;
+  queuedProjectTaskSummaries.add(projectId);
   setImmediate(() => {
     try {
       const taskStats = getProjectTaskStats(projectId);
@@ -2636,6 +2640,8 @@ function queueProjectTaskSummary(projectId) {
       // ponytail: eventual-consistency summary update; use a durable job if
       // recovery after process loss becomes a requirement.
       console.error("failed to update project task summary", error);
+    } finally {
+      queuedProjectTaskSummaries.delete(projectId);
     }
   });
 }
