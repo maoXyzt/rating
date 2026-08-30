@@ -166,7 +166,8 @@ async function getNextTask() {
     criterion: taskFilters.criterion,
     status: 'assigned',
     page: 1,
-    pageSize: 1
+    pageSize: 1,
+    summaryOnly: true
   });
 
   const nextTask = nextPage.tasks[0];

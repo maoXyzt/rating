@@ -4788,6 +4788,12 @@ function listAssignedTasks(query = {}) {
   const hasMore = rows.length > pageSize;
   const pageRows = rows.slice(0, pageSize);
   const lastRow = pageRows[pageRows.length - 1];
+  const summaryOnly = ["1", "true", "yes"].includes(
+    String(query.summaryOnly ?? "").toLowerCase(),
+  );
+  const hydratedRows = summaryOnly
+    ? pageRows.map((row) => ({ ...row, items: [] }))
+    : hydrateTaskListRows(pageRows);
 
   return {
     total,
@@ -4797,7 +4803,7 @@ function listAssignedTasks(query = {}) {
     nextCursor: hasMore && lastRow
       ? serializeTaskCursor(lastRow, Number(lastRow.criterionOrder))
       : null,
-    tasks: hydrateTaskListRows(pageRows).map((row) => ({
+    tasks: hydratedRows.map((row) => ({
       id: row.id,
       subjectId: row.projectId || row.subjectId,
       projectId: row.projectId || row.subjectId,
