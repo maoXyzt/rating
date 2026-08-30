@@ -299,6 +299,8 @@ export function createAdminScoringService({
       scorer: query.scorer || null,
       projectId: query.projectId || null,
       submissionMode: query.submissionMode || null,
+      minDurationSeconds: query.minDurationSeconds || null,
+      maxDurationSeconds: query.maxDurationSeconds || null,
     });
     const cached = summaryCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return cached.value;

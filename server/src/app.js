@@ -5017,23 +5017,29 @@ function completeAssignedTask(taskId, body = {}) {
     });
     if (result.changes === 0)
       throw httpError(409, "任务状态已变更，请刷新后重试");
-
-    const taskStats = getProjectTaskStats(projectId);
-    const remaining = taskStats.pending + taskStats.assigned;
-    if (remaining === 0) {
-      updateSubjectTaskStatusStmt.run({
-        id: projectId,
-        taskStatus: "task_completed",
-        updatedAt: completedAt,
-      });
-    }
-
     db.exec("COMMIT");
   } catch (error) {
     try {
       db.exec("ROLLBACK");
     } catch {}
     throw error;
+  }
+
+  // Keep the write transaction limited to the task transition; summary work
+  // must not make other scorers wait on the SQLite writer lock.
+  try {
+    const taskStats = getProjectTaskStats(projectId);
+    if (taskStats.pending + taskStats.assigned === 0) {
+      updateSubjectTaskStatusStmt.run({
+        id: projectId,
+        taskStatus: "task_completed",
+        updatedAt: completedAt,
+      });
+    }
+  } catch (error) {
+    // The task is already committed; best-effort summary work must not turn a
+    // successful submission into a retryable 500 response.
+    console.error("failed to update project task summary", error);
   }
 
   invalidateTaskSummaryCaches(projectId);
@@ -6196,6 +6202,7 @@ app.put("/api/feedbacks/:id/status", async (req, res, next) => {
 
 app.post(
   "/api/tasks/:id/complete",
+  requireScorer,
   async (req, res, next) => {
     try {
       res.json({
@@ -6208,11 +6215,11 @@ app.post(
       next(error);
     }
   },
-  requireScorer,
 );
 
 app.put(
   "/api/tasks/:id/complete",
+  requireScorer,
   async (req, res, next) => {
     try {
       res.json({
@@ -6225,7 +6232,6 @@ app.put(
       next(error);
     }
   },
-  requireScorer,
 );
 
 app.get("/api/tasks/:id", requireScorer, async (req, res, next) => {

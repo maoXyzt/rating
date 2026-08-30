@@ -160,22 +160,22 @@ async function getNextTask() {
   const scorer = currentUser.value?.username;
   if (!scorer) throw new Error('未获取到当前打分人');
 
-  const [nextPage] = await Promise.all([
-    imageApi.assignedTasks({
-      scorer,
-      projectId: taskFilters.projectId,
-      criterion: taskFilters.criterion,
-      status: 'assigned',
-      page: 1,
-      pageSize: 1
-    }),
-    loadTasks(taskPage.value, taskPageSize.value),
-    loadTaskStats()
-  ]);
+  const nextPage = await imageApi.assignedTasks({
+    scorer,
+    projectId: taskFilters.projectId,
+    criterion: taskFilters.criterion,
+    status: 'assigned',
+    page: 1,
+    pageSize: 1
+  });
 
   const nextTask = nextPage.tasks[0];
   if (!nextTask) return null;
   const result = await imageApi.assignedTaskDetail(nextTask.id);
+  void Promise.all([
+    loadTasks(taskPage.value, taskPageSize.value),
+    loadTaskStats()
+  ]);
   return result.task;
 }
 

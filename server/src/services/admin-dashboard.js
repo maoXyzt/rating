@@ -470,10 +470,10 @@ export function createAdminDashboardService({
   }
 
   function getDashboardProgressSummary(projectId = null) {
-    return {
+    return cachedDashboardValue(`progress:${projectId || "none"}`, () => ({
       scorers: listDashboardScorerProgress(projectId),
       teams: listDashboardTeamProgress(projectId),
-    };
+    }));
   }
 
   function getDashboardStats() {
