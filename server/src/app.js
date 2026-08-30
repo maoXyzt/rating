@@ -1880,19 +1880,10 @@ async function importZipArchive(
     );
 
     // All archive I/O and image validation has completed before this write
-    // transaction. Rebuild these non-unique read indexes once after the bulk
-    // insert instead of updating them for every template row.
+    // transaction. Keep read indexes in place so imports do not rebuild the
+    // entire images table while holding SQLite's writer lock.
     db.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
-    db.exec(`
-      DROP INDEX IF EXISTS idx_images_subject_category;
-      DROP INDEX IF EXISTS idx_images_subject_createdAt;
-      DROP INDEX IF EXISTS idx_images_importBatch;
-      DROP INDEX IF EXISTS idx_images_ratedAt;
-      DROP INDEX IF EXISTS idx_images_thumbnail_path;
-      DROP INDEX IF EXISTS idx_subject_task_templates_subject_order;
-      DROP INDEX IF EXISTS idx_subject_task_template_items_image;
-    `);
     insertSubjectStmt.run({
       id: subjectId,
       name: subjectName,
@@ -1922,23 +1913,6 @@ async function importZipArchive(
         });
       }
     }
-
-    db.exec(`
-      CREATE INDEX idx_images_subject_category
-        ON images(subjectId, category);
-      CREATE INDEX idx_images_subject_createdAt
-        ON images(subjectId, createdAt DESC);
-      CREATE INDEX idx_images_importBatch
-        ON images(importBatch);
-      CREATE INDEX idx_images_ratedAt
-        ON images(ratedAt);
-      CREATE INDEX idx_images_thumbnail_path
-        ON images(thumbnailPath);
-      CREATE INDEX idx_subject_task_templates_subject_order
-        ON subject_task_templates(subjectId, round, criterion, sourceTaskId);
-      CREATE INDEX idx_subject_task_template_items_image
-        ON subject_task_template_items(imageId);
-    `);
 
     const updatedAt = nowIso();
     updateSubjectCountsStmt.run({
@@ -5022,6 +4996,7 @@ function completeAssignedTask(taskId, body = {}) {
   );
   const completedAt = nowIso();
   const startedAt = new Date(Date.now() - durationMs).toISOString();
+  const projectId = task.projectId || task.subjectId;
 
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -5042,7 +5017,6 @@ function completeAssignedTask(taskId, body = {}) {
     if (result.changes === 0)
       throw httpError(409, "任务状态已变更，请刷新后重试");
 
-    const projectId = task.projectId || task.subjectId;
     const taskStats = getProjectTaskStats(projectId);
     const remaining = taskStats.pending + taskStats.assigned;
     if (remaining === 0) {
@@ -5053,16 +5027,17 @@ function completeAssignedTask(taskId, body = {}) {
       });
     }
 
-    const updated = selectTaskByIdStmt.get(task.id);
     db.exec("COMMIT");
-    invalidateTaskSummaryCaches(projectId);
-    return hydrateTaskRows([updated])[0];
   } catch (error) {
     try {
       db.exec("ROLLBACK");
     } catch {}
     throw error;
   }
+
+  invalidateTaskSummaryCaches(projectId);
+  const updated = selectTaskByIdStmt.get(task.id);
+  return hydrateTaskRows([updated])[0];
 }
 
 function updateCompletedTask(taskId, body = {}) {
@@ -5126,16 +5101,17 @@ function updateCompletedTask(taskId, body = {}) {
     if (result.changes === 0)
       throw httpError(409, "任务状态已变更，请刷新后重试");
 
-    const updated = selectTaskByIdStmt.get(task.id);
     db.exec("COMMIT");
-    invalidateTaskSummaryCaches(task.projectId || task.subjectId);
-    return hydrateTaskRows([updated])[0];
   } catch (error) {
     try {
       db.exec("ROLLBACK");
     } catch {}
     throw error;
   }
+
+  invalidateTaskSummaryCaches(task.projectId || task.subjectId);
+  const updated = selectTaskByIdStmt.get(task.id);
+  return hydrateTaskRows([updated])[0];
 }
 
 function normalizeTaskAssigneeNames(value) {
