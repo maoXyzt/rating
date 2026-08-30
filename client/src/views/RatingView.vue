@@ -171,7 +171,13 @@ async function getNextTask() {
   });
 
   const nextTask = nextPage.tasks[0];
-  if (!nextTask) return null;
+  if (!nextTask) {
+    await Promise.all([
+      loadTasks(taskPage.value, taskPageSize.value),
+      loadTaskStats()
+    ]);
+    return null;
+  }
   const result = await imageApi.assignedTaskDetail(nextTask.id);
   void Promise.all([
     loadTasks(taskPage.value, taskPageSize.value),

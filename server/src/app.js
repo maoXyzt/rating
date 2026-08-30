@@ -37,6 +37,8 @@ const taskImageSelectColumns =
   "id AS _id, subjectId, filename, originalPath, storagePath, thumbnailPath, category, directory, isInfographic, prompt";
 const taskListImageSelectColumns =
   "id AS _id, filename, storagePath, thumbnailPath";
+const imageListSelectColumns =
+  "id AS _id, subjectId, filename, storagePath, thumbnailPath, category, directory, isInfographic";
 const uploadDir = path.resolve(process.env.UPLOAD_DIR || "uploads");
 const zipUploadDir = path.join(uploadDir, "_zips");
 const chunkUploadDir = path.join(uploadDir, "_chunks");
@@ -2251,7 +2253,7 @@ function parseFeedbackImagePaths(value) {
   }
 }
 
-function feedbackDto(row) {
+function feedbackDto(row, messages = null) {
   if (!row) return null;
   const imagePaths = parseFeedbackImagePaths(row.imagePaths);
   return {
@@ -2266,7 +2268,7 @@ function feedbackDto(row) {
     repliedBy: row.repliedBy ?? null,
     repliedAt: row.repliedAt ?? null,
     updatedAt: row.updatedAt,
-    messages: selectFeedbackMessagesStmt.all(row.id).map((message) => ({
+    messages: (messages ?? selectFeedbackMessagesStmt.all(row.id)).map((message) => ({
       id: message.id,
       author: message.author,
       authorRole: message.authorRole,
@@ -2278,6 +2280,25 @@ function feedbackDto(row) {
       url: `/files/${imagePath}`,
     })),
   };
+}
+
+function feedbackMessagesByIds(ids) {
+  if (!ids.length) return new Map();
+  const rows = db
+    .prepare(`
+      SELECT id, feedbackId, author, authorRole, content, createdAt
+      FROM feedback_messages
+      WHERE feedbackId IN (${placeholders(ids.length)})
+      ORDER BY feedbackId ASC, createdAt ASC, id ASC
+    `)
+    .all(...ids);
+  const messagesByFeedbackId = new Map();
+  rows.forEach((message) => {
+    const messages = messagesByFeedbackId.get(message.feedbackId) || [];
+    messages.push(message);
+    messagesByFeedbackId.set(message.feedbackId, messages);
+  });
+  return messagesByFeedbackId;
 }
 
 function listFeedbacks(query = {}) {
@@ -2296,12 +2317,15 @@ function listFeedbacks(query = {}) {
   const total = db
     .prepare(`SELECT COUNT(*) AS total FROM feedbacks${where}`)
     .get(...params).total;
-  const items = db
+  const rows = db
     .prepare(
       `SELECT * FROM feedbacks${where} ORDER BY submittedAt DESC, id DESC LIMIT ? OFFSET ?`,
     )
-    .all(...params, pageSize, (page - 1) * pageSize)
-    .map(feedbackDto);
+    .all(...params, pageSize, (page - 1) * pageSize);
+  const messagesByFeedbackId = feedbackMessagesByIds(rows.map((row) => row.id));
+  const items = rows.map((row) =>
+    feedbackDto(row, messagesByFeedbackId.get(row.id) || []),
+  );
   return { total, page, pageSize, items };
 }
 
@@ -2548,6 +2572,19 @@ function imageDto(row) {
     imageUrl: imageAssetUrl(row.storagePath),
     thumbnailUrl: imageAssetUrl(row.thumbnailPath),
     score: scoreFromRow(row),
+  };
+}
+
+function imageListDto(row) {
+  return {
+    _id: row._id,
+    subjectId: row.subjectId,
+    filename: row.filename,
+    category: row.category,
+    directory: row.directory || "",
+    isInfographic: Boolean(row.isInfographic),
+    imageUrl: imageAssetUrl(row.storagePath),
+    thumbnailUrl: imageAssetUrl(row.thumbnailPath),
   };
 }
 
@@ -4744,7 +4781,27 @@ function taskCriterionOrderSql(column) {
   return `CASE ${cases} ELSE ${taskCriteria.length} END`;
 }
 
+const assignedTaskListCache = new Map();
+const assignedTaskListCacheTtlMs = 1000;
+
+function invalidateAssignedTaskListCache() {
+  assignedTaskListCache.clear();
+}
+
 function listAssignedTasks(query = {}) {
+  const cacheKey = JSON.stringify({
+    scorer: query.scorer || null,
+    projectId: query.projectId || null,
+    page: query.page || 1,
+    pageSize: query.pageSize || 10,
+    cursor: query.cursor || null,
+    status: query.status || null,
+    criterion: query.criterion || null,
+    summaryOnly: query.summaryOnly || null,
+  });
+  const cached = assignedTaskListCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
   const filter = buildScorerTaskFilter(query);
   const { page, pageSize } = parseTaskPagination(query);
   const criterionOrder = taskCriterionOrderSql("rating_tasks.taskType");
@@ -4802,7 +4859,7 @@ function listAssignedTasks(query = {}) {
     ? pageRows.map((row) => ({ ...row, items: [] }))
     : hydrateTaskListRows(pageRows);
 
-  return {
+  const value = {
     total,
     page,
     pageSize,
@@ -4820,6 +4877,14 @@ function listAssignedTasks(query = {}) {
       items: row.items,
     })),
   };
+  if (assignedTaskListCache.size >= 256) {
+    assignedTaskListCache.delete(assignedTaskListCache.keys().next().value);
+  }
+  assignedTaskListCache.set(cacheKey, {
+    value,
+    expiresAt: Date.now() + assignedTaskListCacheTtlMs,
+  });
+  return value;
 }
 
 function getTaskDetail(taskId, { projectId = null, scorer = null } = {}) {
@@ -5075,6 +5140,7 @@ function completeAssignedTask(taskId, body = {}) {
   }
 
   invalidateTaskSummaryCaches(projectId);
+  invalidateAssignedTaskListCache();
   queueProjectTaskSummary(projectId);
   const updated = selectTaskByIdStmt.get(task.id);
   return hydrateTaskRows([updated])[0];
@@ -5150,6 +5216,7 @@ function updateCompletedTask(taskId, body = {}) {
   }
 
   invalidateTaskSummaryCaches(task.projectId || task.subjectId);
+  invalidateAssignedTaskListCache();
   const updated = selectTaskByIdStmt.get(task.id);
   return hydrateTaskRows([updated])[0];
 }
@@ -5859,15 +5926,23 @@ function listImages(query) {
   const page = Math.max(Number(query.page) || 1, 1);
   const pageSize = Math.min(Math.max(Number(query.pageSize) || 20, 1), 100);
   const { where, params } = buildImageFilter(query);
-  const total = db
-    .prepare(`SELECT COUNT(*) AS total FROM images${where}`)
-    .get(...params).total;
+  const includeTotal = ["1", "true", "yes"].includes(
+    String(query.includeTotal ?? "").toLowerCase(),
+  );
+  const includeDetails = ["1", "true", "yes"].includes(
+    String(query.includeDetails ?? "").toLowerCase(),
+  );
+  const total = includeTotal
+    ? db.prepare(`SELECT COUNT(*) AS total FROM images${where}`).get(...params).total
+    : null;
+  const selectColumns = includeDetails ? imageSelectColumns : imageListSelectColumns;
+  const toDto = includeDetails ? imageDto : imageListDto;
   const items = db
     .prepare(
-      `SELECT ${imageSelectColumns} FROM images${where} ORDER BY createdAt DESC LIMIT ? OFFSET ?`,
+      `SELECT ${selectColumns} FROM images${where} ORDER BY createdAt DESC LIMIT ? OFFSET ?`,
     )
     .all(...params, pageSize, (page - 1) * pageSize)
-    .map(imageDto);
+    .map(toDto);
 
   return { total, page, pageSize, items };
 }

@@ -63,7 +63,9 @@ async function loadImages() {
     imagePage.value = await imageApi.list({
       subjectId,
       page: page.value,
-      pageSize
+      pageSize,
+      includeTotal: true,
+      includeDetails: true
     });
   } catch (error) {
     imagePage.value = emptyPage();

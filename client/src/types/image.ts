@@ -127,8 +127,10 @@ export interface ImageQuery {
   scorer?: string | null;
   scoreCriteria?: ScoreCriterionKey[] | null;
   scoreRanges?: Partial<Record<ScoreCriterionKey, ScoreRange>> | null;
+  includeTotal?: boolean;
+  includeDetails?: boolean;
 }
-export interface ImagePage { total: number; page: number; pageSize: number; items: ImageItem[]; }
+export interface ImagePage { total: number | null; page: number; pageSize: number; items: ImageItem[]; }
 
 export interface RatingTaskItem {
   imageId: string;
