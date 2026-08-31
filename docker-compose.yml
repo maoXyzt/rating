@@ -25,8 +25,13 @@ services:
       UPLOAD_DIR: /app/uploads
       PG_POOL_MAX: ${PG_POOL_MAX:-12}
       PG_WORKER_POOL_MAX: ${PG_WORKER_POOL_MAX:-1}
+      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-15000}
+      PG_WORKER_STATEMENT_TIMEOUT_MS: ${PG_WORKER_STATEMENT_TIMEOUT_MS:-10000}
+      PG_LOCK_TIMEOUT_MS: ${PG_LOCK_TIMEOUT_MS:-2000}
       QUERY_WORKERS: ${QUERY_WORKERS:-12}
       QUERY_MAX_QUEUE: ${QUERY_MAX_QUEUE:-120}
+      QUERY_TIMEOUT_MS: ${QUERY_TIMEOUT_MS:-12000}
+      QUERY_DEADLINE_MS: ${QUERY_DEADLINE_MS:-15000}
     volumes:
       - ${RATING_DATA_DIR:-/data/sunwenxiu/rating}/uploads:/app/uploads
       - ${RATING_DATA_DIR:-/data/sunwenxiu/rating}/inbox:/app/inbox

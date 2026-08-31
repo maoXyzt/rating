@@ -8,8 +8,8 @@ function positiveEnvInt(name, fallback) {
 
 const WORKER_COUNT = positiveEnvInt("QUERY_WORKERS", 12);
 const MAX_QUEUE = positiveEnvInt("QUERY_MAX_QUEUE", WORKER_COUNT * 10);
-const QUERY_TIMEOUT_MS = 5000;
-const QUERY_DEADLINE_MS = 5000;
+const QUERY_TIMEOUT_MS = positiveEnvInt("QUERY_TIMEOUT_MS", 12000);
+const QUERY_DEADLINE_MS = positiveEnvInt("QUERY_DEADLINE_MS", 15000);
 
 export class QueryOverloadedError extends Error {
   status = 503;

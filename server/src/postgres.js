@@ -28,11 +28,19 @@ export const userSelectColumns = "id, username, role, status, lastLoginAt, creat
 const defaultPoolMax = isMainThread ? 12 : 1;
 const poolMaxVariable = isMainThread ? "PG_POOL_MAX" : "PG_WORKER_POOL_MAX";
 const configuredPoolMax = Number.parseInt(process.env[poolMaxVariable] || "", 10);
+const defaultStatementTimeout = isMainThread ? 15000 : 10000;
+const statementTimeoutVariable = isMainThread ? "PG_STATEMENT_TIMEOUT_MS" : "PG_WORKER_STATEMENT_TIMEOUT_MS";
+const configuredStatementTimeout = Number.parseInt(process.env[statementTimeoutVariable] || "", 10);
+const statementTimeout = Number.isInteger(configuredStatementTimeout) && configuredStatementTimeout > 0
+  ? configuredStatementTimeout
+  : defaultStatementTimeout;
+const lockTimeout = Number.parseInt(process.env.PG_LOCK_TIMEOUT_MS || "2000", 10);
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: Number.isInteger(configuredPoolMax) && configuredPoolMax > 0 ? configuredPoolMax : defaultPoolMax,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
+  options: `-c statement_timeout=${statementTimeout} -c lock_timeout=${Number.isInteger(lockTimeout) && lockTimeout > 0 ? lockTimeout : 2000}`,
 });
 const transactionStorage = new AsyncLocalStorage();
 const camelNames = new Map();
