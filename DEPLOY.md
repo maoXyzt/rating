@@ -1,12 +1,13 @@
 # 图片评分平台部署流程
 
-这份文档用于把当前项目部署到服务器。项目已经切换为 SQLite，不需要安装 MongoDB。
+这份文档用于把当前项目部署到服务器。数据库使用同一 Compose 中的 `postgres:18-trixie` 容器。
 
 ## 1. 部署架构
 
 - `web`：前端静态页面，运行在 Nginx 容器里，对外暴露 `8080` 端口。
 - `api`：Node.js / Express 服务，处理 ZIP 分片上传、图片解析、评分保存。
-- `sqlite_data`：Docker volume，保存 SQLite 数据库。
+- `postgres`：`postgres:18-trixie` 数据库容器。
+- `postgres_data`：Docker volume，保存 PostgreSQL 数据。
 - `image_uploads`：Docker volume，保存解压后的图片文件。
 
 默认访问地址：
@@ -47,7 +48,7 @@ cd image-rating-platform
 
 如果没有 Git 仓库，也可以把项目压缩包上传到 `/opt` 后解压，进入项目根目录即可。
 
-首次启动：
+首次启动（当前 Compose 会同时拉起 PostgreSQL；API 运行时切换完成后再执行生产迁移）：
 
 ```bash
 # 默认使用 8080；如果外部访问端口是 8001：
@@ -96,39 +97,37 @@ git pull
 docker compose up --build -d
 ```
 
-注意：不要随意执行 `docker compose down -v`，它会删除 SQLite 数据和上传图片对应的 Docker volume。
+注意：不要随意执行 `docker compose down -v`，它会删除 PostgreSQL 数据和上传图片对应的 Docker volume。
 
 ## 5. 数据持久化位置
 
 Docker 部署时，数据不会写在项目源码目录里，而是写入 Docker volume：
 
-- SQLite 数据库：`sqlite_data`
+- PostgreSQL 数据库：`postgres_data`
 - 上传图片：`image_uploads`
 
 查看实际 volume 名称：
 
 ```bash
-docker volume ls | grep sqlite_data
+docker volume ls | grep postgres_data
 docker volume ls | grep image_uploads
 ```
 
-Compose 会根据项目目录名给 volume 加前缀，例如 `image-rating-platform_sqlite_data`。
+Compose 会根据项目目录名给 volume 加前缀，例如 `image-rating-platform_postgres_data`。
 
 ## 6. 备份数据
 
-SQLite 处于 WAL 模式。备份数据库前先停止 API，保证数据库文件和 WAL 状态一致；图片 volume 可以在 API 停止期间一并备份。
+使用 `pg_dump` 备份 PostgreSQL；图片 volume 单独备份。
 
 在项目根目录执行：
 
 ```bash
 mkdir -p backups
-docker compose stop api
-docker run --rm -v image-rating-platform_sqlite_data:/data -v "$PWD/backups:/backup" alpine tar czf /backup/sqlite_data_$(date +%Y%m%d_%H%M%S).tgz -C /data .
+docker compose exec -T postgres pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" > backups/postgres_$(date +%Y%m%d_%H%M%S).sql
 docker run --rm -v image-rating-platform_image_uploads:/data -v "$PWD/backups:/backup" alpine tar czf /backup/image_uploads_$(date +%Y%m%d_%H%M%S).tgz -C /data .
-docker compose start api
 ```
 
-如果你的 volume 前缀不同，把命令里的 `image-rating-platform_sqlite_data` 和 `image-rating-platform_image_uploads` 替换成 `docker volume ls` 看到的实际名称。
+如果你的 volume 前缀不同，把命令里的 `image-rating-platform_image_uploads` 替换成 `docker volume ls` 看到的实际名称。
 
 ## 7. 恢复数据
 
@@ -138,10 +137,10 @@ docker compose start api
 docker compose down
 ```
 
-恢复 SQLite volume：
+恢复 PostgreSQL：
 
 ```bash
-docker run --rm -v image-rating-platform_sqlite_data:/data -v "$PWD/backups:/backup" alpine sh -c "rm -rf /data/* && tar xzf /backup/你的_sqlite_备份文件.tgz -C /data"
+cat backups/你的_postgres_备份文件.sql | docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
 ```
 
 恢复图片 volume：
@@ -156,7 +155,19 @@ docker run --rm -v image-rating-platform_image_uploads:/data -v "$PWD/backups:/b
 docker compose up -d
 ```
 
-## 8. 域名和 HTTPS
+## 8. SQLite 首次迁移
+
+先准备旧 SQLite 文件和 PostgreSQL 容器，再在服务端目录执行：
+
+```bash
+SQLITE_PATH=/path/to/image-rating.sqlite \
+DATABASE_URL=postgresql://用户名:密码@主机:5432/数据库名 \
+npm run migrate:sqlite
+```
+
+迁移脚本会创建基础表/索引、按表导入数据并在失败时回滚；应用 DAO 尚未完成 PostgreSQL 异步化前，不要将 API 切换到该数据库。
+
+## 9. 域名和 HTTPS
 
 如果你希望使用域名访问，建议让本项目继续监听 `8080`，在服务器宿主机 Nginx 上反向代理到 `127.0.0.1:8080`。
 
@@ -189,17 +200,18 @@ apt install -y certbot python3-certbot-nginx
 certbot --nginx -d your.domain.com
 ```
 
-## 9. 环境变量
+## 10. 环境变量
 
-`docker-compose.yml` 里已经配置了默认值：
+`docker-compose.yml` 里已经配置了 PostgreSQL 连接目标；当前 API 仍保留旧 SQLite 参数，待 DAO 改造完成后删除：
 
 ```yaml
 PORT: 3000
-DB_PATH: /app/data/image-rating.sqlite
+DATABASE_URL: postgresql://用户名:密码@postgres:5432/数据库名
+DB_PATH: /app/data/image-rating.sqlite # 迁移期间仅供旧运行时使用
 UPLOAD_DIR: /app/uploads
 ```
 
-通常不需要修改。只有在你要改变容器内部存储路径或端口时才需要调整。
+`POSTGRES_PASSWORD` 必须通过 `.env` 或部署环境设置；不要提交到仓库。
 
 可选的安全和上传限制配置：
 
@@ -213,7 +225,7 @@ MAX_IMAGE_UNCOMPRESSED_BYTES: 134217728
 
 启用 `COOKIE_SECURE` 后，请确保浏览器始终通过 HTTPS 访问站点，否则登录 Cookie 不会被发送。
 
-## 10. 常见问题
+## 11. 常见问题
 
 上传 ZIP 报 `413 Request Entity Too Large`：
 
@@ -235,9 +247,9 @@ MAX_IMAGE_UNCOMPRESSED_BYTES: 134217728
 - 执行 `docker compose logs -f api` 查看解压和文件保存日志。
 - 确认 `image_uploads` volume 正常挂载。
 
-## 11. 本地开发启动
+## 12. 本地开发启动
 
-本地开发不需要 MongoDB，SQLite 会自动创建。
+本地开发通过 Compose 启动 PostgreSQL。
 
 ```bash
 npm run install:all
