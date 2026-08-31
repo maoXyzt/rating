@@ -97,6 +97,11 @@ export interface ProjectItem {
   updatedAt: string;
 }
 
+export interface ScorerProjectOption {
+  _id: string;
+  name: string;
+}
+
 export interface ProjectPage {
   total: number;
   page: number;
@@ -127,8 +132,10 @@ export interface ImageQuery {
   scorer?: string | null;
   scoreCriteria?: ScoreCriterionKey[] | null;
   scoreRanges?: Partial<Record<ScoreCriterionKey, ScoreRange>> | null;
+  includeTotal?: boolean;
+  includeDetails?: boolean;
 }
-export interface ImagePage { total: number; page: number; pageSize: number; items: ImageItem[]; }
+export interface ImagePage { total: number | null; page: number; pageSize: number; items: ImageItem[]; }
 
 export interface RatingTaskItem {
   imageId: string;
