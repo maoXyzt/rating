@@ -39,6 +39,7 @@ const taskFilters = reactive({
   criterion: null as RatingTask['criterion'] | null,
   status: null as 'assigned' | 'completed' | null
 });
+let taskLoadTimer: number | null = null;
 
 const criterionOptions = taskCriteria.map(item => ({ label: item.label, value: item.key }));
 const projectOptions = computed(() => projects.value
@@ -295,7 +296,18 @@ const columns: DataTableColumns<ScorerTaskListItem> = [
   }
 ];
 
-watch(taskFilters, () => void loadTasks(1, taskPageSize.value), { deep: true });
+function scheduleTaskLoad() {
+  if (taskLoadTimer != null) window.clearTimeout(taskLoadTimer);
+  taskLoadTimer = window.setTimeout(() => {
+    taskLoadTimer = null;
+    void loadTasks(1, taskPageSize.value);
+  }, 150);
+}
+
+watch(taskFilters, scheduleTaskLoad, { deep: true });
+onBeforeUnmount(() => {
+  if (taskLoadTimer != null) window.clearTimeout(taskLoadTimer);
+});
 
 onMounted(() => {
   void loadProjects();

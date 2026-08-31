@@ -2,10 +2,10 @@ import crypto from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { databasePath } from "./database-path.js";
 
-const WORKER_COUNT = 4;
-const MAX_QUEUE = 32;
-const QUERY_TIMEOUT_MS = 1000;
-const QUERY_DEADLINE_MS = 1500;
+const WORKER_COUNT = 8;
+const MAX_QUEUE = 128;
+const QUERY_TIMEOUT_MS = 5000;
+const QUERY_DEADLINE_MS = 5000;
 
 export class QueryOverloadedError extends Error {
   status = 503;
@@ -49,9 +49,11 @@ export function createQueryWorkerPool(options = {}) {
   let cacheEpoch = 0;
   const pending = new Map();
   const ttlByOperation = {
-    assignedTasks: 2000,
-    assignedTaskOptions: 300000,
-    scorerDashboard: 10000,
+    assignedTasks: 1000,
+    assignedTaskOptions: 60000,
+    scorerDashboard: 2000,
+    images: 1500,
+    feedbacks: 1500,
     ...(options.ttlByOperation || {}),
   };
 

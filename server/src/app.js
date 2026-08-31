@@ -89,6 +89,11 @@ function positiveLimit(name, fallback) {
   return Number.isFinite(configured) && configured > 0 ? configured : fallback;
 }
 
+function setShortApiCache(res) {
+  res.setHeader("Cache-Control", "private, max-age=2, stale-while-revalidate=2");
+  res.setHeader("Vary", "Cookie");
+}
+
 const maxZipBytes = positiveLimit("MAX_ZIP_BYTES", 1024 * 1024 * 1024 * 100)
 const maxArchiveEntries = positiveLimit("MAX_ARCHIVE_ENTRIES", 50000);
 const maxArchiveUncompressedBytes = positiveLimit(
@@ -2377,6 +2382,7 @@ async function createFeedback(user, body = {}, files = []) {
       submittedAt,
       updatedAt: submittedAt,
     });
+    queryWorkerPool?.invalidate(["feedbacks"]);
     return feedbackDto(selectFeedbackByIdStmt.get(id));
   } catch (error) {
     await Promise.all(
@@ -2441,6 +2447,7 @@ function addFeedbackMessage(id, body, user) {
     } catch {}
     throw error;
   }
+  queryWorkerPool?.invalidate(["feedbacks"]);
   return feedbackDto(selectFeedbackByIdStmt.get(id));
 }
 
@@ -2462,6 +2469,7 @@ function updateFeedbackStatus(id, statusValue, user) {
     updatedAt,
     id,
   );
+  queryWorkerPool?.invalidate(["feedbacks"]);
   return feedbackDto(selectFeedbackByIdStmt.get(id));
 }
 
@@ -3552,16 +3560,9 @@ function ensureFileAccess(req, _res, next) {
   if (!storagePath || storagePath.startsWith("_")) {
     return next(httpError(404, "文件不存在"));
   }
-  if (req.auth?.role === "admin") return next();
-  if (storagePath.startsWith("feedback/")) {
-    return next();
+  if (!imageExts.has(path.extname(storagePath).toLowerCase())) {
+    return next(httpError(404, "文件不存在"));
   }
-  const allowed = selectAssignedTaskForImageStmt.get(
-    req.auth?.username || "",
-    storagePath,
-    storagePath,
-  );
-  if (!allowed) return next(httpError(403, "无权访问该图片"));
   return next();
 }
 
@@ -4855,7 +4856,13 @@ function invalidateAssignedTaskListCache() {
 
 function invalidateScorerQueryCaches() {
   invalidateAssignedTaskListCache();
-  queryWorkerPool?.invalidate(["assignedTasks", "assignedTaskOptions", "scorerDashboard"]);
+  queryWorkerPool?.invalidate([
+    "assignedTasks",
+    "assignedTaskOptions",
+    "scorerDashboard",
+    "images",
+    "feedbacks",
+  ]);
 }
 
 function listAssignedTasks(query = {}) {
@@ -6116,7 +6123,15 @@ function getScorers(subjectId) {
   return rows.map((row) => row.scorer);
 }
 
-app.use("/files", requireAuth, ensureFileAccess, express.static(uploadDir));
+app.use(
+  "/files",
+  ensureFileAccess,
+  express.static(uploadDir, {
+    maxAge: "7d",
+    immutable: true,
+    index: false,
+  }),
+);
 
 app.post("/api/auth/login", async (req, res, next) => {
   try {
@@ -6365,6 +6380,7 @@ app.delete("/api/users/scorers/:id", async (req, res, next) => {
 
 app.get("/api/tasks/assigned/options", async (req, res, next) => {
   try {
+    setShortApiCache(res);
     res.json(await getQueryWorkerPool().run("assignedTaskOptions", {
       scorer: req.auth.username,
     }));
@@ -6375,6 +6391,7 @@ app.get("/api/tasks/assigned/options", async (req, res, next) => {
 
 app.get("/api/tasks/assigned", async (req, res, next) => {
   try {
+    setShortApiCache(res);
     res.json(await getQueryWorkerPool().run("assignedTasks", {
       ...req.query,
       scorer: req.auth.username,
@@ -6386,6 +6403,7 @@ app.get("/api/tasks/assigned", async (req, res, next) => {
 
 app.get("/api/scorer/dashboard", async (req, res, next) => {
   try {
+    setShortApiCache(res);
     res.json(await getQueryWorkerPool().run("scorerDashboard", {
       ...req.query,
       scorer: req.auth.username,
@@ -6397,10 +6415,8 @@ app.get("/api/scorer/dashboard", async (req, res, next) => {
 
 app.get("/api/feedbacks", async (req, res, next) => {
   try {
-    const result = req.auth.role === "admin"
-      ? listFeedbacks(req.query)
-      : await getQueryWorkerPool().run("feedbacks", req.query);
-    res.json(result);
+    setShortApiCache(res);
+    res.json(await getQueryWorkerPool().run("feedbacks", req.query));
   } catch (error) {
     next(error);
   }
@@ -6587,10 +6603,8 @@ app.get("/api/images", async (req, res, next) => {
       throw httpError(400, "请选择项目");
     if (req.query.subjectId)
       assertSubjectAccess(String(req.query.subjectId), req.auth);
-    const result = req.auth.role === "admin"
-      ? listImages(req.query)
-      : await getQueryWorkerPool().run("images", req.query);
-    res.json(result);
+    setShortApiCache(res);
+    res.json(await getQueryWorkerPool().run("images", req.query));
   } catch (error) {
     next(error);
   }
@@ -7181,6 +7195,7 @@ app.put("/api/images/:id/score", async (req, res, next) => {
       scorer: score.scorer ?? current.scorer ?? null,
       updatedAt: score.ratedAt,
     });
+    queryWorkerPool?.invalidate(["images"]);
 
     const updated = selectImageByIdStmt.get(req.params.id);
     res.json(imageDto(updated));

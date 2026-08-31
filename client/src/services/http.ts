@@ -22,6 +22,7 @@ export class HttpError extends Error {
 
 let unauthorizedHandler: (() => void | Promise<void>) | null = null;
 let redirectingToLogin = false;
+const inflightJsonGets = new Map<string, Promise<unknown>>();
 
 export function setUnauthorizedHandler(handler: (() => void | Promise<void>) | null) {
   unauthorizedHandler = handler;
@@ -73,9 +74,22 @@ export async function requestResponse(url: string, init?: RequestInit): Promise<
 }
 
 export async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await requestResponse(url, init);
-  const text = await response.text();
-  return (text ? JSON.parse(text) : undefined) as T;
+  const method = String(init?.method || 'GET').toUpperCase();
+  if (method === 'GET') {
+    const existing = inflightJsonGets.get(url);
+    if (existing) return existing as Promise<T>;
+  }
+
+  const request = (async () => {
+    const response = await requestResponse(url, init);
+    const text = await response.text();
+    return (text ? JSON.parse(text) : undefined) as T;
+  })();
+  if (method === 'GET') {
+    inflightJsonGets.set(url, request);
+    request.then(() => inflightJsonGets.delete(url), () => inflightJsonGets.delete(url));
+  }
+  return request;
 }
 
 export async function requestJsonWithRetry<T>(url: string, init?: RequestInit): Promise<T> {
@@ -86,7 +100,7 @@ export async function requestJsonWithRetry<T>(url: string, init?: RequestInit): 
   } catch (error) {
     if (!canRetry || !isQueryUnavailable(error)) throw error;
     const retryAfter = error instanceof HttpError ? error.retryAfterSeconds : null;
-    const delay = Math.max(300, Math.min((retryAfter || 0) * 1000, 800)) + Math.round(Math.random() * 200);
+    const delay = Math.max(500, Math.min((retryAfter || 1) * 1000, 3000)) + Math.round(Math.random() * 1000);
     await new Promise(resolve => window.setTimeout(resolve, delay));
     return requestJson<T>(url, init);
   }
