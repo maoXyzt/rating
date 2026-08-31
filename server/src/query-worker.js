@@ -472,12 +472,13 @@ parentPort.on("message", async ({ requestId, operation, query }) => {
     if (!handler) throw queryError(400, "不支持的查询操作");
     parentPort.postMessage({ requestId, ok: true, data: await handler(query || {}) });
   } catch (error) {
+    const timedOut = error?.code === "57014";
     parentPort.postMessage({
       requestId,
       ok: false,
-      status: error.status || 500,
-      code: error.code || "QUERY_FAILED",
-      message: error.message || "查询失败",
+      status: timedOut ? 503 : error.status || 500,
+      code: timedOut ? "QUERY_TIMEOUT" : error.code || "QUERY_FAILED",
+      message: timedOut ? "查询执行超时，请稍后重试" : error.message || "查询失败",
     });
   }
 });
