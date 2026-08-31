@@ -53,17 +53,14 @@ function quoteIdentifier(value) {
   return `"${String(value).toLowerCase().replaceAll('"', '""')}"`;
 }
 
-function sqliteTables() {
+function sqliteTables(targetTables) {
   const tables = sqlite
     .prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )
     .all()
     .map((row) => row.name);
-  return [
-    ...migrationOrder.filter((table) => tables.includes(table)),
-    ...tables.filter((table) => !migrationOrder.includes(table)),
-  ];
+  return migrationOrder.filter((table) => tables.includes(table) && targetTables.has(table));
 }
 
 function migrateValue(table, column, value) {
@@ -94,18 +91,19 @@ async function ensureNativeTimestampColumns() {
   }
 }
 
-async function migrateTable(table) {
+async function migrateTable(table, targetColumns) {
   const columns = sqlite
     .prepare(`PRAGMA table_info(${quoteIdentifier(table)})`)
     .all()
     .map((column) => column.name);
+  const migratedColumns = columns.filter((column) => targetColumns.has(column.toLowerCase()));
   const rows = sqlite.prepare(`SELECT * FROM ${quoteIdentifier(table)}`).all();
   if (!rows.length) return { table, rows: 0 };
 
-  const names = columns.map(quoteIdentifier).join(", ");
+  const names = migratedColumns.map(quoteIdentifier).join(", ");
   let migratedRows = 0;
   for (const row of rows) {
-    const values = columns.map((column) => migrateValue(table, column, row[column]));
+    const values = migratedColumns.map((column) => migrateValue(table, column, row[column]));
     const placeholders = values.map((_, index) => `$${index + 1}`).join(", ");
     const result = await client.query(
       `INSERT INTO ${quoteIdentifier(table)} (${names}) VALUES (${placeholders})`,
@@ -117,6 +115,53 @@ async function migrateTable(table) {
   return { table, rows: migratedRows };
 }
 
+async function loadTargetTableColumns() {
+  const result = await client.query(
+    `SELECT table_name, column_name
+     FROM information_schema.columns
+     WHERE table_schema = current_schema()`,
+  );
+  const tables = new Set();
+  const columns = new Map();
+  for (const { table_name: table, column_name: column } of result.rows) {
+    tables.add(table);
+    if (!columns.has(table)) columns.set(table, new Set());
+    columns.get(table).add(column);
+  }
+  return { tables, columns };
+}
+
+async function rebuildTaskStats() {
+  await client.query("DELETE FROM project_task_stats");
+  await client.query(`
+    INSERT INTO project_task_stats
+      (projectid, taskversion, total, pending, assigned, completed, updatedat)
+    SELECT projectid, taskversion, COUNT(*),
+           SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
+           SUM(CASE WHEN status = 'assigned' THEN 1 ELSE 0 END),
+           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END),
+           COALESCE(MAX(updatedat), CURRENT_TIMESTAMP)
+    FROM rating_tasks
+    WHERE projectid IS NOT NULL
+    GROUP BY projectid, taskversion
+  `);
+
+  await client.query("DELETE FROM scorer_task_stats");
+  await client.query(`
+    INSERT INTO scorer_task_stats
+      (scorer, taskversion, projectid, assigned, completed, updatedat)
+    SELECT scorer, taskversion, COALESCE(projectid, ''),
+           SUM(CASE WHEN status = 'assigned' THEN 1 ELSE 0 END),
+           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END),
+           COALESCE(MAX(updatedat), CURRENT_TIMESTAMP)
+    FROM rating_tasks
+    WHERE scorer IS NOT NULL
+      AND BTRIM(scorer) <> ''
+      AND status IN ('assigned', 'completed')
+    GROUP BY scorer, taskversion, COALESCE(projectid, '')
+  `);
+}
+
 await client.connect();
 try {
   await client.query("BEGIN");
@@ -124,10 +169,14 @@ try {
   await client.query("DROP INDEX IF EXISTS idx_rating_tasks_project, idx_rating_tasks_export");
   const schemaPath = new URL("./postgres-schema.sql", import.meta.url);
   await client.query(await fs.readFile(schemaPath, "utf8"));
+  const target = await loadTargetTableColumns();
   await ensureNativeTimestampColumns();
   await client.query("ALTER TABLE rating_tasks DISABLE TRIGGER trg_rating_tasks_stats");
   const results = [];
-  for (const table of sqliteTables()) results.push(await migrateTable(table));
+  for (const table of sqliteTables(target.tables)) {
+    results.push(await migrateTable(table, target.columns.get(table)));
+  }
+  await rebuildTaskStats();
   await client.query("ALTER TABLE rating_tasks ENABLE TRIGGER trg_rating_tasks_stats");
   await client.query("COMMIT");
   await client.query("ANALYZE");
