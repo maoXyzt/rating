@@ -231,7 +231,7 @@ API 已只使用 PostgreSQL；不要再设置 `DB_PATH` 或挂载 SQLite 数据�
 PORT: 3000
 DATABASE_URL: postgresql://用户名:密码@postgres:5432/数据库名
 UPLOAD_DIR: /app/uploads
-PG_POOL_MAX: 16
+PG_POOL_MAX: 24
 PG_STATEMENT_TIMEOUT_MS: 15000
 PG_LOCK_TIMEOUT_MS: 2000
 ```
@@ -240,7 +240,7 @@ PG_LOCK_TIMEOUT_MS: 2000
 
 `RATING_DATA_DIR` 用于配置宿主机数据根目录，默认值为 `/data/sunwenxiu/rating`；修改 `.env` 后重新执行 `docker compose up` 即可生效。需要在宿主机执行备份或恢复命令时，先按第 5 节加载该变量。
 
-按约 100 人同时使用的单 API 实例，以上连接配置最多约 16 条 PostgreSQL 连接。PostgreSQL 的 `statement_timeout` 限制单条 SQL 执行时间；连接池负责短时排队。若压测显示慢查询会造成大量等待，应优先优化 SQL/索引，再考虑增加应用层并发限制。
+按约 100 人同时使用的单 API 实例，以上连接配置最多约 24 条 PostgreSQL 连接。PostgreSQL 的 `statement_timeout` 限制单条 SQL 执行时间；连接池负责短时排队。若压测显示慢查询会造成大量等待，应优先优化 SQL/索引，再考虑继续增加连接数。
 
 可选的安全和上传限制配置：
 

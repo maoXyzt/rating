@@ -23,7 +23,7 @@ services:
       PORT: 3000
       DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-image_rating}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-image_rating}}
       UPLOAD_DIR: /app/uploads
-      PG_POOL_MAX: ${PG_POOL_MAX:-16}
+      PG_POOL_MAX: ${PG_POOL_MAX:-24}
       PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-15000}
       PG_LOCK_TIMEOUT_MS: ${PG_LOCK_TIMEOUT_MS:-2000}
     volumes:
