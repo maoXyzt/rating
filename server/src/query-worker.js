@@ -409,12 +409,13 @@ function assignedTaskOptions(query) {
   const user = db.prepare("SELECT 1 FROM users WHERE username = ? AND role = 'scorer' LIMIT 1").get(scorer);
   if (!user) throw queryError(404, "打分账号不存在");
   const rows = db.prepare(`
-    SELECT DISTINCT projects.id AS _id, projects.name, projects.createdAt
-    FROM rating_tasks
-    JOIN projects ON projects.id = rating_tasks.projectId
-    WHERE rating_tasks.taskVersion = ?
-      AND rating_tasks.scorer = ?
-      AND rating_tasks.status IN ('assigned', 'completed')
+    SELECT projects.id AS _id, projects.name, projects.createdAt
+    FROM scorer_task_stats
+    JOIN projects ON projects.id = scorer_task_stats.projectId
+    WHERE scorer_task_stats.taskVersion = ?
+      AND scorer_task_stats.scorer = ?
+      AND scorer_task_stats.projectId <> ''
+      AND (scorer_task_stats.assigned + scorer_task_stats.completed) > 0
       AND projects.deletionRequestedAt IS NULL
     ORDER BY projects.createdAt DESC, projects.id ASC
   `).all(taskVersion, scorer);
@@ -427,19 +428,29 @@ function scorerDashboard(query) {
   const user = db.prepare("SELECT 1 FROM users WHERE username = ? AND role = 'scorer' LIMIT 1").get(scorer);
   if (!user) throw queryError(404, "打分账号不存在");
   const projectId = query.projectId ? parseProjectId(query.projectId) : null;
-  const stats = db.prepare(`
-    SELECT SUM(CASE WHEN status = 'assigned' THEN 1 ELSE 0 END) AS pendingTasks,
-           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completedTasks
-    FROM rating_tasks
-    WHERE taskVersion = ? AND scorer = ? AND (? IS NULL OR projectId = ?)
-  `).get(taskVersion, scorer, projectId, projectId);
-  const pendingTasks = Number(stats.pendingTasks || 0);
-  const completedTasks = Number(stats.completedTasks || 0);
+  const stats = projectId
+    ? db.prepare(`
+        SELECT assigned AS pendingTasks,
+               completed AS completedTasks
+        FROM scorer_task_stats
+        WHERE taskVersion = ? AND scorer = ? AND projectId = ?
+      `).get(taskVersion, scorer, projectId)
+    : db.prepare(`
+        SELECT COALESCE(SUM(assigned), 0) AS pendingTasks,
+               COALESCE(SUM(completed), 0) AS completedTasks
+        FROM scorer_task_stats
+        WHERE taskVersion = ? AND scorer = ?
+      `).get(taskVersion, scorer);
+  const pendingTasks = Number(stats?.pendingTasks || 0);
+  const completedTasks = Number(stats?.completedTasks || 0);
   const totalTasks = pendingTasks + completedTasks;
   const projectCount = Number(db.prepare(`
-    SELECT COUNT(DISTINCT projectId) AS total
-    FROM rating_tasks
-    WHERE taskVersion = ? AND scorer = ? AND status IN ('assigned', 'completed')
+    SELECT COUNT(*) AS total
+    FROM scorer_task_stats
+    WHERE taskVersion = ?
+      AND scorer = ?
+      AND projectId <> ''
+      AND (assigned + completed) > 0
   `).get(taskVersion, scorer).total || 0);
   return {
     pendingTasks,

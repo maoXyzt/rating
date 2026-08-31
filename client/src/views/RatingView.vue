@@ -29,6 +29,11 @@ const taskStats = ref<Pick<ScorerDashboard, 'pendingTasks' | 'completedTasks' | 
   totalTasks: 0,
   projectCount: 0
 });
+const taskStatsRefreshMinIntervalMs = 10_000;
+let taskStatsRefreshTimer: number | null = null;
+let taskStatsLoadPromise: Promise<void> | null = null;
+let lastTaskStatsLoadAt = 0;
+let taskStatsRefreshVersion = 0;
 const taskFilters = reactive({
   projectId: null as string | null,
   criterion: null as RatingTask['criterion'] | null,
@@ -78,6 +83,32 @@ function changePageSize(pageSize: number) {
   void loadTasks(1, pageSize);
 }
 
+function clearTaskStatsRefreshTimer() {
+  if (taskStatsRefreshTimer !== null) {
+    window.clearTimeout(taskStatsRefreshTimer);
+    taskStatsRefreshTimer = null;
+  }
+}
+
+function scheduleTaskStatsRefresh(force = false) {
+  taskStatsRefreshVersion += 1;
+  const requestVersion = taskStatsRefreshVersion;
+  const elapsed = Date.now() - lastTaskStatsLoadAt;
+  const delay = force || !lastTaskStatsLoadAt || elapsed >= taskStatsRefreshMinIntervalMs
+    ? 0
+    : taskStatsRefreshMinIntervalMs - elapsed;
+
+  clearTaskStatsRefreshTimer();
+  if (delay > 0 && taskStatsState.value === 'ready') {
+    taskStatsState.value = 'stale';
+  }
+  taskStatsRefreshTimer = window.setTimeout(() => {
+    taskStatsRefreshTimer = null;
+    if (requestVersion !== taskStatsRefreshVersion) return;
+    void loadTaskStats();
+  }, delay);
+}
+
 async function loadTasks(page = taskPage.value, pageSize = taskPageSize.value) {
   const scorer = currentUser.value?.username;
   if (!scorer) return;
@@ -120,26 +151,41 @@ async function loadProjects() {
 }
 
 async function loadTaskStats() {
+  if (taskStatsLoadPromise) return taskStatsLoadPromise;
   const scorer = currentUser.value?.username;
   if (!scorer) return;
-  taskStatsState.value = taskStats.value.totalTasks ? 'stale' : 'loading';
+  const requestVersion = taskStatsRefreshVersion;
+  const request = (async () => {
+    taskStatsState.value = taskStats.value.totalTasks ? 'stale' : 'loading';
+    try {
+      const result = await imageApi.scorerDashboard({
+        scorer,
+        projectId: null
+      });
+      taskStats.value = {
+        pendingTasks: result.pendingTasks,
+        completedTasks: result.completedTasks,
+        totalTasks: result.totalTasks,
+        projectCount: result.projectCount
+      };
+      taskStatsState.value = 'ready';
+    } catch (error) {
+      if (isQueryUnavailable(error)) taskStatsState.value = taskStats.value.totalTasks ? 'stale' : 'unavailable';
+      else {
+        taskStatsState.value = taskStats.value.totalTasks ? 'stale' : 'ready';
+        message.error(errorMessage(error));
+      }
+    } finally {
+      lastTaskStatsLoadAt = Date.now();
+    }
+  })();
+  taskStatsLoadPromise = request;
   try {
-    const result = await imageApi.scorerDashboard({
-      scorer,
-      projectId: null
-    });
-    taskStats.value = {
-      pendingTasks: result.pendingTasks,
-      completedTasks: result.completedTasks,
-      totalTasks: result.totalTasks,
-      projectCount: result.projectCount
-    };
-    taskStatsState.value = 'ready';
-  } catch (error) {
-    if (isQueryUnavailable(error)) taskStatsState.value = taskStats.value.totalTasks ? 'stale' : 'unavailable';
-    else {
-      taskStatsState.value = taskStats.value.totalTasks ? 'stale' : 'ready';
-      message.error(errorMessage(error));
+    await request;
+  } finally {
+    if (taskStatsLoadPromise === request) taskStatsLoadPromise = null;
+    if (requestVersion !== taskStatsRefreshVersion) {
+      scheduleTaskStatsRefresh(true);
     }
   }
 }
@@ -171,10 +217,8 @@ async function openRanking(task: ScorerTaskListItem) {
 function handleTaskSaved(task: RatingTask, advancing = false) {
   if (activeTask.value?.id === task.id) activeTask.value = task;
   if (!advancing) {
-    void Promise.all([
-      loadTasks(taskPage.value, taskPageSize.value),
-      loadTaskStats()
-    ]);
+    void loadTasks(taskPage.value, taskPageSize.value);
+    scheduleTaskStatsRefresh();
   }
 }
 
@@ -194,17 +238,13 @@ async function getNextTask() {
 
   const nextTask = nextPage.tasks[0];
   if (!nextTask) {
-    await Promise.all([
-      loadTasks(taskPage.value, taskPageSize.value),
-      loadTaskStats()
-    ]);
+    await loadTasks(taskPage.value, taskPageSize.value);
+    scheduleTaskStatsRefresh();
     return null;
   }
   const result = await imageApi.assignedTaskDetail(nextTask.id);
-  void Promise.all([
-    loadTasks(taskPage.value, taskPageSize.value),
-    loadTaskStats()
-  ]);
+  void loadTasks(taskPage.value, taskPageSize.value);
+  scheduleTaskStatsRefresh();
   return result.task;
 }
 
@@ -272,7 +312,11 @@ onBeforeUnmount(() => {
 onMounted(() => {
   void loadProjects();
   void loadTasks();
-  window.setTimeout(() => void loadTaskStats(), 200);
+  window.setTimeout(() => scheduleTaskStatsRefresh(true), 200);
+});
+
+onBeforeUnmount(() => {
+  clearTaskStatsRefreshTimer();
 });
 </script>
 
