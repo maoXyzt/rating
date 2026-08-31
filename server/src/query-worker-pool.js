@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import { Worker } from "node:worker_threads";
-import { databasePath } from "./database-path.js";
 
 const WORKER_COUNT = 8;
 const MAX_QUEUE = 128;
@@ -60,7 +59,6 @@ export function createQueryWorkerPool(options = {}) {
   function spawn(index) {
     const worker = new Worker(new URL("./query-worker.js", import.meta.url), {
       workerData: {
-        databasePath: options.databasePath || databasePath,
         taskVersion: options.taskVersion || "v3",
         taskCriteria: options.taskCriteria || [],
         scoreNumericFields: options.scoreNumericFields || [],

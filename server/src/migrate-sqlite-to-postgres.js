@@ -46,6 +46,8 @@ async function migrateTable(table) {
 
 await client.connect();
 try {
+  // Rebuild the indexes whose PostgreSQL ordering differs from SQLite.
+  await client.query("DROP INDEX IF EXISTS idx_rating_tasks_project, idx_rating_tasks_export");
   const schemaPath = new URL("./postgres-schema.sql", import.meta.url);
   await client.query(await fs.readFile(schemaPath, "utf8"));
   await client.query("BEGIN");
@@ -55,6 +57,7 @@ try {
   for (const table of sqliteTables()) results.push(await migrateTable(table));
   await client.query("COMMIT");
   await client.query("SET session_replication_role = origin");
+  await client.query("ANALYZE");
   for (const result of results) console.log(`${result.table}: ${result.rows}`);
 } catch (error) {
   await client.query("ROLLBACK").catch(() => {});

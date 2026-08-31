@@ -352,3 +352,64 @@ create index if not exists idx_subject_task_templates_selection on subject_task_
 create index if not exists idx_images_thumbnail_path on images(thumbnailpath);
 create unique index if not exists idx_teams_name_ci on teams(lower(name));
 create unique index if not exists idx_projects_active_name_ci on projects(lower(trim(name))) where deletionrequestedat is null;
+
+-- Keep the denormalized dashboard counters in sync with rating_tasks.
+create or replace function sync_rating_task_stats() returns trigger language plpgsql as $$
+begin
+  if tg_op in ('DELETE', 'UPDATE') and old.projectid is not null then
+    update project_task_stats
+       set total = greatest(0, total - 1),
+           pending = greatest(0, pending - case when old.status = 'pending' then 1 else 0 end),
+           assigned = greatest(0, assigned - case when old.status = 'assigned' then 1 else 0 end),
+           completed = greatest(0, completed - case when old.status = 'completed' then 1 else 0 end),
+           updatedat = coalesce(new.updatedat, old.updatedat)
+     where projectid = old.projectid and taskversion = old.taskversion;
+  end if;
+
+  if tg_op in ('DELETE', 'UPDATE') and old.scorer is not null and btrim(old.scorer) <> ''
+     and old.status in ('assigned', 'completed') then
+    update scorer_task_stats
+       set assigned = greatest(0, assigned - case when old.status = 'assigned' then 1 else 0 end),
+           completed = greatest(0, completed - case when old.status = 'completed' then 1 else 0 end),
+           updatedat = coalesce(new.updatedat, old.updatedat)
+     where scorer = old.scorer and taskversion = old.taskversion
+       and projectid = coalesce(old.projectid, '');
+    delete from scorer_task_stats
+     where scorer = old.scorer and taskversion = old.taskversion
+       and projectid = coalesce(old.projectid, '') and assigned = 0 and completed = 0;
+  end if;
+
+  if tg_op in ('INSERT', 'UPDATE') and new.projectid is not null then
+    insert into project_task_stats(projectid, taskversion, total, pending, assigned, completed, updatedat)
+    values (new.projectid, new.taskversion, 1,
+            case when new.status = 'pending' then 1 else 0 end,
+            case when new.status = 'assigned' then 1 else 0 end,
+            case when new.status = 'completed' then 1 else 0 end, new.updatedat)
+    on conflict (projectid, taskversion) do update set
+      total = project_task_stats.total + 1,
+      pending = project_task_stats.pending + excluded.pending,
+      assigned = project_task_stats.assigned + excluded.assigned,
+      completed = project_task_stats.completed + excluded.completed,
+      updatedat = excluded.updatedat;
+  end if;
+
+  if tg_op in ('INSERT', 'UPDATE') and new.scorer is not null and btrim(new.scorer) <> ''
+     and new.status in ('assigned', 'completed') then
+    insert into scorer_task_stats(scorer, taskversion, projectid, assigned, completed, updatedat)
+    values (new.scorer, new.taskversion, coalesce(new.projectid, ''),
+            case when new.status = 'assigned' then 1 else 0 end,
+            case when new.status = 'completed' then 1 else 0 end, new.updatedat)
+    on conflict (scorer, taskversion, projectid) do update set
+      assigned = scorer_task_stats.assigned + excluded.assigned,
+      completed = scorer_task_stats.completed + excluded.completed,
+      updatedat = excluded.updatedat;
+  end if;
+
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_rating_tasks_stats on rating_tasks;
+create trigger trg_rating_tasks_stats after insert or update or delete on rating_tasks
+for each row execute function sync_rating_task_stats();

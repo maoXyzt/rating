@@ -28,7 +28,7 @@ import {
   projectSelectColumns,
   subjectSelectColumns,
   userSelectColumns,
-} from "./sqlite.js";
+} from "./postgres.js";
 import { createAdminDashboardService } from "./services/admin-dashboard.js";
 import { createAdminScoringService } from "./services/admin-scoring.js";
 import { createQueryWorkerPool } from "./query-worker-pool.js";
@@ -1903,9 +1903,9 @@ async function importZipArchive(
     // All archive I/O and image validation has completed before this write
     // transaction. Keep read indexes in place so imports do not rebuild the
     // entire images table while holding SQLite's writer lock.
-    db.exec("BEGIN IMMEDIATE");
+    await db.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
-    insertSubjectStmt.run({
+    await insertSubjectStmt.run({
       id: subjectId,
       name: subjectName,
       originalFilename,
@@ -1916,7 +1916,7 @@ async function importZipArchive(
       updatedAt: createdAt,
     });
     for (const imageRecord of imageRecords) {
-      const result = insertImageStmt.run(imageRecord);
+      const result = await insertImageStmt.run(imageRecord);
       if (result.changes === 0) {
         throw archiveImportError(
           409,
@@ -1926,9 +1926,9 @@ async function importZipArchive(
     }
     for (const taskTemplate of taskTemplates) {
       const { items: _items, ...templateRecord } = taskTemplate;
-      insertSubjectTaskTemplateStmt.run(templateRecord);
+      await insertSubjectTaskTemplateStmt.run(templateRecord);
       for (const item of taskTemplate.items) {
-        insertSubjectTaskTemplateItemStmt.run({
+        await insertSubjectTaskTemplateItemStmt.run({
           templateId: taskTemplate.id,
           ...item,
         });
@@ -1936,7 +1936,7 @@ async function importZipArchive(
     }
 
     const updatedAt = nowIso();
-    updateSubjectCountsStmt.run({
+    await updateSubjectCountsStmt.run({
       id: subjectId,
       imageCount: imported,
       categoryCount: directories.size,
@@ -1944,9 +1944,9 @@ async function importZipArchive(
       updatedAt,
     });
 
-    db.exec("COMMIT");
+    await db.exec("COMMIT");
     transactionOpen = false;
-    const subject = selectSubjectByIdStmt.get(subjectId);
+    const subject = await selectSubjectByIdStmt.get(subjectId);
     return {
       subject: subjectDto(subject),
       batch,
@@ -1961,7 +1961,7 @@ async function importZipArchive(
   } catch (error) {
     if (transactionOpen) {
       try {
-        db.exec("ROLLBACK");
+        await db.exec("ROLLBACK");
       } catch (rollbackError) {
         console.error("Failed to roll back ZIP import", rollbackError);
       }
@@ -1969,7 +1969,7 @@ async function importZipArchive(
 
     // Covers failures after a commit as well as older databases with partial imports.
     try {
-      db.prepare("DELETE FROM subjects WHERE id = ?").run(subjectId);
+      await db.prepare("DELETE FROM subjects WHERE id = ?").run(subjectId);
     } catch (cleanupError) {
       console.error("Failed to clean up ZIP import record", cleanupError);
     }
@@ -1988,14 +1988,14 @@ async function runResumableImportJob(job) {
     job.status = "importing";
     job.stage = "正在解析并导入图片";
     job.progress = 0;
-    persistImportJob(job);
+    await persistImportJob(job);
 
     job.result = await importZipArchive(job.zipPath, job.originalFilename, {
-      onProgress: ({ current, total }) => {
+      onProgress: async ({ current, total }) => {
         job.progress = Math.min(99, Math.round((current / total) * 100));
         if (job.progress !== job.lastPersistedProgress) {
           job.lastPersistedProgress = job.progress;
-          persistImportJob(job);
+          await persistImportJob(job);
         }
       },
     });
@@ -2003,22 +2003,22 @@ async function runResumableImportJob(job) {
     job.status = "completed";
     job.stage = "导入完成";
     job.progress = 100;
-    persistImportJob(job);
+    await persistImportJob(job);
   } catch (error) {
     const normalized = normalizeArchiveImportError(error);
     job.status = "failed";
     job.stage = "导入失败";
     job.message = normalized.message || "导入失败，请重试";
-    persistImportJob(job);
+    await persistImportJob(job);
     console.error(`Resumable ZIP import failed (${job.uploadId})`, error);
   } finally {
     await cleanupResumableUploadSession(job.uploadId).catch(() => {});
 
     // 保留结果一段时间，允许前端在短暂断线后继续查询本次任务。
     setTimeout(
-      () => {
+      async () => {
         importJobs.delete(job.uploadId);
-        deleteImportJobStmt.run(job.uploadId);
+        await deleteImportJobStmt.run(job.uploadId);
       },
       24 * 60 * 60 * 1000,
     ).unref();
@@ -2069,10 +2069,10 @@ function importJobFromRow(row) {
   };
 }
 
-function persistImportJob(job) {
+async function persistImportJob(job) {
   job.expiresAt = job.expiresAt || importJobExpiry();
   const updatedAt = nowIso();
-  updateImportJobStmt.run({
+  await updateImportJobStmt.run({
     uploadId: job.uploadId,
     status: job.status,
     stage: job.stage,
@@ -2133,32 +2133,32 @@ async function runChunkedImportJob(job) {
     job.status = "merging";
     job.stage = "正在合并上传分片";
     job.progress = 0;
-    persistImportJob(job);
+    await persistImportJob(job);
     await mergeChunkedZip(job);
 
     job.status = "importing";
     job.stage = "正在解析并导入图片";
     job.progress = 15;
-    persistImportJob(job);
+    await persistImportJob(job);
     job.result = await importZipArchive(job.zipPath, job.originalFilename, {
-      onProgress: ({ current, total }) => {
+      onProgress: async ({ current, total }) => {
         job.progress = Math.min(99, 15 + Math.round((current / total) * 84));
         if (job.progress !== job.lastPersistedProgress) {
           job.lastPersistedProgress = job.progress;
-          persistImportJob(job);
+          await persistImportJob(job);
         }
       },
     });
     job.status = "completed";
     job.stage = "导入完成";
     job.progress = 100;
-    persistImportJob(job);
+    await persistImportJob(job);
   } catch (error) {
     const normalized = normalizeArchiveImportError(error);
     job.status = "failed";
     job.stage = "导入失败";
     job.message = normalized.message || "导入失败，请重试";
-    persistImportJob(job);
+    await persistImportJob(job);
     console.error(`Chunked ZIP import failed (${job.uploadId})`, error);
   } finally {
     await fs.rm(job.dir, { recursive: true, force: true }).catch(() => {});
@@ -2166,9 +2166,9 @@ async function runChunkedImportJob(job) {
 
     // 保留结果一段时间，允许前端在短暂断线后继续查询本次任务。
     setTimeout(
-      () => {
+      async () => {
         importJobs.delete(job.uploadId);
-        deleteImportJobStmt.run(job.uploadId);
+        await deleteImportJobStmt.run(job.uploadId);
       },
       24 * 60 * 60 * 1000,
     ).unref();
@@ -2272,7 +2272,7 @@ function parseFeedbackImagePaths(value) {
   }
 }
 
-function feedbackDto(row, messages = null) {
+async function feedbackDto(row, messages = null) {
   if (!row) return null;
   const imagePaths = parseFeedbackImagePaths(row.imagePaths);
   return {
@@ -2287,7 +2287,7 @@ function feedbackDto(row, messages = null) {
     repliedBy: row.repliedBy ?? null,
     repliedAt: row.repliedAt ?? null,
     updatedAt: row.updatedAt,
-    messages: (messages ?? selectFeedbackMessagesStmt.all(row.id)).map((message) => ({
+    messages: (messages ?? (await selectFeedbackMessagesStmt.all(row.id))).map((message) => ({
       id: message.id,
       author: message.author,
       authorRole: message.authorRole,
@@ -2301,9 +2301,9 @@ function feedbackDto(row, messages = null) {
   };
 }
 
-function feedbackMessagesByIds(ids) {
+async function feedbackMessagesByIds(ids) {
   if (!ids.length) return new Map();
-  const rows = db
+  const rows = await db
     .prepare(`
       SELECT id, feedbackId, author, authorRole, content, createdAt
       FROM feedback_messages
@@ -2320,7 +2320,7 @@ function feedbackMessagesByIds(ids) {
   return messagesByFeedbackId;
 }
 
-function listFeedbacks(query = {}) {
+async function listFeedbacks(query = {}) {
   const page = Math.max(Number(query.page) || 1, 1);
   const pageSize = Math.min(Math.max(Number(query.pageSize) || 10, 1), 100);
   const clauses = [];
@@ -2333,18 +2333,18 @@ function listFeedbacks(query = {}) {
   }
 
   const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-  const total = db
+  const total = (await db
     .prepare(`SELECT COUNT(*) AS total FROM feedbacks${where}`)
-    .get(...params).total;
-  const rows = db
+    .get(...params)).total;
+  const rows = await db
     .prepare(
       `SELECT * FROM feedbacks${where} ORDER BY submittedAt DESC, id DESC LIMIT ? OFFSET ?`,
     )
     .all(...params, pageSize, (page - 1) * pageSize);
-  const messagesByFeedbackId = feedbackMessagesByIds(rows.map((row) => row.id));
-  const items = rows.map((row) =>
-    feedbackDto(row, messagesByFeedbackId.get(row.id) || []),
-  );
+  const messagesByFeedbackId = await feedbackMessagesByIds(rows.map((row) => row.id));
+  const items = await Promise.all(rows.map(
+    async row => await feedbackDto(row, messagesByFeedbackId.get(row.id) || [])
+  ));
   return { total, page, pageSize, items };
 }
 
@@ -2372,7 +2372,7 @@ async function createFeedback(user, body = {}, files = []) {
       storedPaths.push(relativePath);
     }
 
-    insertFeedbackStmt.run({
+    await insertFeedbackStmt.run({
       id,
       title,
       type,
@@ -2383,7 +2383,7 @@ async function createFeedback(user, body = {}, files = []) {
       updatedAt: submittedAt,
     });
     queryWorkerPool?.invalidate(["feedbacks"]);
-    return feedbackDto(selectFeedbackByIdStmt.get(id));
+    return await feedbackDto(await selectFeedbackByIdStmt.get(id));
   } catch (error) {
     await Promise.all(
       storedPaths.map((relativePath) =>
@@ -2401,8 +2401,8 @@ function assertFeedbackAccess(feedback, user) {
   }
 }
 
-function addFeedbackMessage(id, body, user) {
-  const feedback = selectFeedbackByIdStmt.get(id);
+async function addFeedbackMessage(id, body, user) {
+  const feedback = await selectFeedbackByIdStmt.get(id);
   if (!feedback) throw httpError(404, "问题反馈不存在");
   if (feedback.status === "resolved") {
     throw httpError(409, "该反馈已解决，不能继续回复");
@@ -2422,9 +2422,9 @@ function addFeedbackMessage(id, body, user) {
     requestedStatus ||
     (feedback.status === "pending" ? "processing" : feedback.status);
   const repliedAt = nowIso();
-  db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN IMMEDIATE");
   try {
-    insertFeedbackMessageStmt.run({
+    await insertFeedbackMessageStmt.run({
       id: crypto.randomUUID(),
       feedbackId: feedback.id,
       author: user.username,
@@ -2432,7 +2432,7 @@ function addFeedbackMessage(id, body, user) {
       content,
       createdAt: repliedAt,
     });
-    updateFeedbackReplyStmt.run({
+    await updateFeedbackReplyStmt.run({
       id,
       status,
       reply: content,
@@ -2440,46 +2440,42 @@ function addFeedbackMessage(id, body, user) {
       repliedAt,
       updatedAt: repliedAt,
     });
-    db.exec("COMMIT");
+    await db.exec("COMMIT");
   } catch (error) {
     try {
-      db.exec("ROLLBACK");
+      await db.exec("ROLLBACK");
     } catch {}
     throw error;
   }
   queryWorkerPool?.invalidate(["feedbacks"]);
-  return feedbackDto(selectFeedbackByIdStmt.get(id));
+  return await feedbackDto(await selectFeedbackByIdStmt.get(id));
 }
 
-function updateFeedbackStatus(id, statusValue, user) {
-  const feedback = selectFeedbackByIdStmt.get(id);
+async function updateFeedbackStatus(id, statusValue, user) {
+  const feedback = await selectFeedbackByIdStmt.get(id);
   assertFeedbackAccess(feedback, user);
   const status = parseFeedbackStatus(statusValue);
   if (status === "pending") throw httpError(400, "反馈状态不能恢复为未处理");
   if (
     status === "resolved" &&
     feedback.status !== "resolved" &&
-    !selectFeedbackMessageExistsStmt.get(feedback.id)
+    !(await selectFeedbackMessageExistsStmt.get(feedback.id))
   ) {
     throw httpError(400, "至少回复一次后才能标记为已解决");
   }
   const updatedAt = nowIso();
-  db.prepare("UPDATE feedbacks SET status = ?, updatedAt = ? WHERE id = ?").run(
-    status,
-    updatedAt,
-    id,
-  );
+  await db.prepare("UPDATE feedbacks SET status = ?, updatedAt = ? WHERE id = ?").run(status, updatedAt, id);
   queryWorkerPool?.invalidate(["feedbacks"]);
-  return feedbackDto(selectFeedbackByIdStmt.get(id));
+  return await feedbackDto(await selectFeedbackByIdStmt.get(id));
 }
 
-function legacyReplyFeedback(id, body, admin) {
-  const feedback = selectFeedbackByIdStmt.get(id);
+async function legacyReplyFeedback(id, body, admin) {
+  const feedback = await selectFeedbackByIdStmt.get(id);
   if (!feedback) throw httpError(404, "问题反馈不存在");
   const status = parseFeedbackStatus(body?.status);
   const reply = parseFeedbackText(body?.reply, "答复内容", 5000);
   const repliedAt = nowIso();
-  updateFeedbackReplyStmt.run({
+  await updateFeedbackReplyStmt.run({
     id,
     status,
     reply,
@@ -2487,7 +2483,7 @@ function legacyReplyFeedback(id, body, admin) {
     repliedAt,
     updatedAt: repliedAt,
   });
-  return feedbackDto(selectFeedbackByIdStmt.get(id));
+  return await feedbackDto(await selectFeedbackByIdStmt.get(id));
 }
 
 function escapeLike(value) {
@@ -2667,8 +2663,8 @@ function teamDto(row) {
     : null;
 }
 
-function getProjectTaskStats(projectId, version = taskVersion) {
-  const row = selectProjectTaskStatsStmt.get(projectId, version);
+async function getProjectTaskStats(projectId, version = taskVersion) {
+  const row = await selectProjectTaskStatsStmt.get(projectId, version);
   return {
     total: Number(row?.total || 0),
     pending: Number(row?.pending || 0),
@@ -2690,11 +2686,11 @@ function queueProjectTaskSummary(projectId) {
     return;
   }
   queuedProjectTaskSummaries.add(projectId);
-  setImmediate(() => {
+  setImmediate(async () => {
     try {
-      const taskStats = getProjectTaskStats(projectId);
+      const taskStats = await getProjectTaskStats(projectId);
       if (taskStats.pending + taskStats.assigned !== 0) return;
-      updateSubjectTaskStatusStmt.run({
+      await updateSubjectTaskStatusStmt.run({
         id: projectId,
         taskStatus: "task_completed",
         updatedAt: nowIso(),
@@ -2712,10 +2708,10 @@ function queueProjectTaskSummary(projectId) {
   });
 }
 
-function projectStatsByIds(projectIds, version = taskVersion) {
+async function projectStatsByIds(projectIds, version = taskVersion) {
   const ids = [...new Set(projectIds.filter(Boolean))];
   if (!ids.length) return new Map();
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT projectId, total, pending, assigned, completed
        FROM project_task_stats
@@ -2736,11 +2732,11 @@ function projectStatsByIds(projectIds, version = taskVersion) {
   );
 }
 
-function projectRelatedRowsByIds(projectIds) {
+async function projectRelatedRowsByIds(projectIds) {
   const ids = [...new Set(projectIds.filter(Boolean))];
   if (!ids.length) return new Map();
 
-  const packageRows = db
+  const packageRows = await db
     .prepare(
       `SELECT project_packages.projectId AS _projectId,
               subjects.id AS _id,
@@ -2775,7 +2771,7 @@ function projectRelatedRowsByIds(projectIds) {
                 subjects.id ASC`,
     )
     .all(...ids);
-  const teamRows = db
+  const teamRows = await db
     .prepare(
       `SELECT project_teams.projectId AS _projectId,
               teams.id,
@@ -2800,23 +2796,19 @@ function projectRelatedRowsByIds(projectIds) {
   return relatedByProjectId;
 }
 
-function mapProjectRows(rows) {
-  const statsByProjectId = projectStatsByIds(rows.map((row) => row._id));
-  const relatedByProjectId = projectRelatedRowsByIds(rows.map((row) => row._id));
-  return rows.map((row) =>
-    projectDto(
-      row,
-      statsByProjectId.get(row._id),
-      relatedByProjectId.get(row._id),
-    ),
-  );
+async function mapProjectRows(rows) {
+  const statsByProjectId = await projectStatsByIds(rows.map((row) => row._id));
+  const relatedByProjectId = await projectRelatedRowsByIds(rows.map((row) => row._id));
+  return await Promise.all(rows.map(
+    async row => await projectDto(row, statsByProjectId.get(row._id), relatedByProjectId.get(row._id))
+  ));
 }
 
-function projectDto(row, taskStats = null, related = null) {
+async function projectDto(row, taskStats = null, related = null) {
   if (!row) return null;
   const packageRows = related?.packageRows?.length
     ? related.packageRows
-    : selectProjectPackagesStmt.all(row._id);
+    : await selectProjectPackagesStmt.all(row._id);
   const fallbackPackage = row.packageId
     ? [{
         _id: row.packageId,
@@ -2837,7 +2829,7 @@ function projectDto(row, taskStats = null, related = null) {
     (total, item) => total + Number(item.taskTemplateCount || 0),
     0,
   );
-  const stats = taskStats || getProjectTaskStats(row._id);
+  const stats = taskStats || (await getProjectTaskStats(row._id));
   const generatedTaskCount = stats.total;
   const pendingTaskCount = stats.pending;
   const remainingTemplateCount = Math.max(taskTemplateCount - generatedTaskCount, 0);
@@ -2870,14 +2862,14 @@ function projectDto(row, taskStats = null, related = null) {
     availableTaskCount: pendingTaskCount + remainingTemplateCount,
     taskStatus: row.taskStatus || "task_pending",
     deletionRequestedAt: row.deletionRequestedAt ?? null,
-    teams: (related?.teamRows || selectProjectTeamsStmt.all(row._id)).map(teamDto),
+    teams: (related?.teamRows || (await selectProjectTeamsStmt.all(row._id))).map(teamDto),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
 }
 
-function projectSubjectDto(project, projectView = null) {
-  const view = projectView || projectDto(project);
+async function projectSubjectDto(project, projectView = null) {
+  const view = projectView || (await projectDto(project));
   if (!view) return null;
   return {
     _id: view._id,
@@ -2895,21 +2887,21 @@ function projectSubjectDto(project, projectView = null) {
   };
 }
 
-function listProjects() {
-  return mapProjectRows(selectProjectsStmt.all());
+async function listProjects() {
+  return await mapProjectRows(await selectProjectsStmt.all());
 }
 
-function listProjectsPage(query = {}) {
+async function listProjectsPage(query = {}) {
   const { page, pageSize } = parseTaskPagination(query);
-  const total = db
+  const total = (await db
     .prepare(
       `SELECT COUNT(*) AS total
        FROM projects
        JOIN subjects ON subjects.id = projects.packageId
        WHERE projects.deletionRequestedAt IS NULL`,
     )
-    .get().total;
-  const projectRows = db
+    .get()).total;
+  const projectRows = await db
     .prepare(
       `SELECT ${projectSelectColumns}
        FROM projects
@@ -2919,7 +2911,7 @@ function listProjectsPage(query = {}) {
        LIMIT ? OFFSET ?`,
     )
     .all(pageSize, (page - 1) * pageSize);
-  const projects = mapProjectRows(projectRows);
+  const projects = await mapProjectRows(projectRows);
   return { total, page, pageSize, projects };
 }
 
@@ -2940,7 +2932,7 @@ function normalizeTeamNames(value) {
   return names;
 }
 
-function normalizeTeamIds(value, { required = false, enabledOnly = false } = {}) {
+async function normalizeTeamIds(value, { required = false, enabledOnly = false } = {}) {
   if (!Array.isArray(value)) {
     if (required) throw httpError(400, "请选择标注团队");
     return [];
@@ -2948,7 +2940,7 @@ function normalizeTeamIds(value, { required = false, enabledOnly = false } = {})
   const ids = [...new Set(value.map((item) => String(item ?? "").trim()).filter(Boolean))];
   if (required && !ids.length) throw httpError(400, "请选择标注团队");
   if (ids.length > 20) throw httpError(400, "最多选择 20 个团队");
-  const teams = ids.map((id) => selectTeamByIdStmt.get(id));
+  const teams = await Promise.all(ids.map(async id => await selectTeamByIdStmt.get(id)));
   const missing = ids.filter((_, index) => !teams[index]);
   if (missing.length) throw httpError(400, "存在已删除的团队，请刷新后重试");
   const disabled = teams.filter((team) => team.status === "disabled");
@@ -2961,16 +2953,16 @@ function normalizeTeamIds(value, { required = false, enabledOnly = false } = {})
   return ids;
 }
 
-function ensureTeams(teamNames, now) {
-  return teamNames.map((name) => {
-    let team = selectTeamByNameStmt.get(name);
+async function ensureTeams(teamNames, now) {
+  return await Promise.all(teamNames.map(async name => {
+    let team = await selectTeamByNameStmt.get(name);
     if (!team) {
       const id = crypto.randomUUID();
-      insertTeamStmt.run({ id, name, createdAt: now, updatedAt: now });
-      team = selectTeamByIdStmt.get(id);
+      await insertTeamStmt.run({ id, name, createdAt: now, updatedAt: now });
+      team = await selectTeamByIdStmt.get(id);
     }
     return team.id;
-  });
+  }));
 }
 
 function parseEnabledStatus(value, label, { optional = false } = {}) {
@@ -2991,11 +2983,11 @@ function parseTeamName(value) {
   return name;
 }
 
-function listTeams(query = {}) {
+async function listTeams(query = {}) {
   const status = parseEnabledStatus(query.status, "团队", { optional: true });
-  if (!status) return selectTeamsStmt.all().map(teamDto);
+  if (!status) return (await selectTeamsStmt.all()).map(teamDto);
 
-  return db
+  return (await db
     .prepare(
       `SELECT teams.id, teams.name, teams.status, teams.createdAt, teams.updatedAt,
               COUNT(DISTINCT user_teams.userId) AS userCount,
@@ -3007,16 +2999,16 @@ function listTeams(query = {}) {
        GROUP BY teams.id
        ORDER BY teams.name COLLATE NOCASE ASC`,
     )
-    .all(status)
+    .all(status))
     .map(teamDto);
 }
 
-function createTeam(body = {}) {
+async function createTeam(body = {}) {
   const name = parseTeamName(body.name);
   const now = nowIso();
   const id = crypto.randomUUID();
   try {
-    insertTeamStmt.run({ id, name, createdAt: now, updatedAt: now });
+    await insertTeamStmt.run({ id, name, createdAt: now, updatedAt: now });
   } catch (error) {
     if (
       String(error?.message || "").includes(
@@ -3027,18 +3019,18 @@ function createTeam(body = {}) {
     }
     throw error;
   }
-  return teamDto(selectTeamByIdStmt.get(id));
+  return teamDto(await selectTeamByIdStmt.get(id));
 }
 
-function updateTeam(id, body = {}) {
-  const team = selectTeamByIdStmt.get(String(id));
+async function updateTeam(id, body = {}) {
+  const team = await selectTeamByIdStmt.get(String(id));
   if (!team) throw httpError(404, "团队不存在");
   const name = Object.hasOwn(body, "name") ? parseTeamName(body.name) : null;
   const status = parseEnabledStatus(body.status, "团队", { optional: true });
-  if (!name && !status) return teamDto(selectTeamByIdStmt.get(team.id));
+  if (!name && !status) return teamDto(await selectTeamByIdStmt.get(team.id));
 
   try {
-    updateTeamStmt.run({
+    await updateTeamStmt.run({
       id: team.id,
       name,
       status,
@@ -3054,32 +3046,32 @@ function updateTeam(id, body = {}) {
     }
     throw error;
   }
-  return teamDto(selectTeamByIdStmt.get(team.id));
+  return teamDto(await selectTeamByIdStmt.get(team.id));
 }
 
-function syncUserTeams(userId, teamNames, now) {
-  const teamIds = ensureTeams(teamNames, now);
-  deleteUserTeamsStmt.run(userId);
-  teamIds.forEach((teamId) => {
-    insertUserTeamStmt.run({ userId, teamId, createdAt: now });
-  });
+async function syncUserTeams(userId, teamNames, now) {
+  const teamIds = await ensureTeams(teamNames, now);
+  await deleteUserTeamsStmt.run(userId);
+  await Promise.all(teamIds.map(async teamId => {
+    await insertUserTeamStmt.run({ userId, teamId, createdAt: now });
+  }));
 }
 
-function syncProjectTeams(projectId, teamIds, now) {
-  deleteProjectTeamsStmt.run(projectId);
-  teamIds.forEach((teamId) => {
-    insertProjectTeamStmt.run({ projectId, teamId, createdAt: now });
-  });
+async function syncProjectTeams(projectId, teamIds, now) {
+  await deleteProjectTeamsStmt.run(projectId);
+  await Promise.all(teamIds.map(async teamId => {
+    await insertProjectTeamStmt.run({ projectId, teamId, createdAt: now });
+  }));
 }
 
-function deleteTeam(id) {
-  const team = selectTeamByIdStmt.get(String(id));
+async function deleteTeam(id) {
+  const team = await selectTeamByIdStmt.get(String(id));
   if (!team) throw httpError(404, "团队不存在");
-  const usage = selectTeamUsageStmt.get(team.id, team.id);
+  const usage = await selectTeamUsageStmt.get(team.id, team.id);
   if (usage.userCount > 0 || usage.projectCount > 0) {
     throw httpError(409, "团队仍有关联账号或项目，不能删除");
   }
-  deleteTeamStmt.run(team.id);
+  await deleteTeamStmt.run(team.id);
   return { deleted: true };
 }
 
@@ -3090,20 +3082,20 @@ function parseProjectName(value) {
   return name;
 }
 
-function assertProjectNameAvailable(name, excludeId = null) {
-  const existing = selectProjectByNameStmt.get(name);
+async function assertProjectNameAvailable(name, excludeId = null) {
+  const existing = await selectProjectByNameStmt.get(name);
   if (existing && existing.id !== excludeId) {
     throw httpError(409, "项目名称已存在");
   }
 }
 
-function projectPackageIds(project) {
-  const packageRows = selectProjectPackagesStmt.all(project._id);
+async function projectPackageIds(project) {
+  const packageRows = await selectProjectPackagesStmt.all(project._id);
   if (packageRows.length) return packageRows.map((row) => row._id);
   return project.packageId ? [project.packageId] : [];
 }
 
-function normalizeProjectPackageIds(body = {}, fallback = []) {
+async function normalizeProjectPackageIds(body = {}, fallback = []) {
   const raw = Array.isArray(body.packageIds)
     ? body.packageIds
     : body.packageId != null
@@ -3119,7 +3111,7 @@ function normalizeProjectPackageIds(body = {}, fallback = []) {
   if (!packageIds.length) throw httpError(400, "请选择至少一个图包");
   if (packageIds.length > 100) throw httpError(400, "一个项目最多关联 100 个图包");
 
-  const packageRows = packageIds.map((id) => selectSubjectByIdStmt.get(id));
+  const packageRows = await Promise.all(packageIds.map(async id => await selectSubjectByIdStmt.get(id)));
   const missing = packageIds.filter((_, index) => !packageRows[index]);
   if (missing.length) throw httpError(400, "存在不存在的图包，请刷新后重试");
   const unavailable = packageRows.filter((row) => row.status !== "imported");
@@ -3132,90 +3124,91 @@ function normalizeProjectPackageIds(body = {}, fallback = []) {
   return packageIds;
 }
 
-function getProjectOrThrow(projectId) {
-  const project = selectProjectByIdStmt.get(String(projectId));
+async function getProjectOrThrow(projectId) {
+  const project = await selectProjectByIdStmt.get(String(projectId));
   if (!project) throw httpError(404, "项目不存在");
-  if (projectPackageIds(project).some((packageId) => {
-    const packageRow = selectSubjectByIdStmt.get(packageId);
+  const packageStatuses = await Promise.all((await projectPackageIds(project)).map(async (packageId) => {
+    const packageRow = await selectSubjectByIdStmt.get(packageId);
     return !packageRow || packageRow.status !== "imported";
-  })) {
+  }));
+  if (packageStatuses.some(Boolean)) {
     throw httpError(409, "关联图包尚未处理完成");
   }
   return project;
 }
 
-function createProject(body = {}) {
+async function createProject(body = {}) {
   const name = parseProjectName(body.name);
   const icon = "archive";
-  const packageIds = normalizeProjectPackageIds(body);
+  const packageIds = await normalizeProjectPackageIds(body);
   const packageId = packageIds[0];
   const now = nowIso();
   const id = crypto.randomUUID();
-  db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN IMMEDIATE");
   try {
-    assertProjectNameAvailable(name);
-    insertProjectStmt.run({ id, name, icon, packageId, createdAt: now, updatedAt: now });
-    packageIds.forEach((linkedPackageId) => {
-      insertProjectPackageStmt.run({
+    await assertProjectNameAvailable(name);
+    await insertProjectStmt.run({ id, name, icon, packageId, createdAt: now, updatedAt: now });
+    await Promise.all(packageIds.map(async linkedPackageId => {
+      await insertProjectPackageStmt.run({
         projectId: id,
         packageId: linkedPackageId,
         createdAt: now,
       });
-    });
-    db.exec("COMMIT");
+    }));
+    await db.exec("COMMIT");
   } catch (error) {
-    try { db.exec("ROLLBACK"); } catch {}
+    try { await db.exec("ROLLBACK"); } catch {}
     if (String(error?.message || "").includes("UNIQUE constraint failed")) {
       throw httpError(409, "项目名称已存在");
     }
     throw error;
   }
-  return projectDto(selectProjectByIdStmt.get(id));
+  return await projectDto(await selectProjectByIdStmt.get(id));
 }
 
-function updateProject(id, body = {}) {
-  const current = getProjectOrThrow(id);
+async function updateProject(id, body = {}) {
+  const current = await getProjectOrThrow(id);
   const name = parseProjectName(body.name ?? current.name);
   const icon = "archive";
-  const packageIds = normalizeProjectPackageIds(body, projectPackageIds(current));
+  const packageIds = await normalizeProjectPackageIds(body, await projectPackageIds(current));
   const packageId = packageIds[0];
-  const currentPackageIds = projectPackageIds(current);
+  const currentPackageIds = await projectPackageIds(current);
   const packageChanged =
     packageIds.length !== currentPackageIds.length ||
     packageIds.some((item) => !currentPackageIds.includes(item));
-  if (packageChanged && selectProjectTaskCountStmt.get(id).total) {
+  if (packageChanged && (await selectProjectTaskCountStmt.get(id)).total) {
     throw httpError(409, "项目已生成任务，不能更换关联图包");
   }
   const now = nowIso();
-  db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN IMMEDIATE");
   try {
-    assertProjectNameAvailable(name, id);
-    updateProjectStmt.run({ id, name, icon, packageId, updatedAt: now });
-    deleteProjectPackagesStmt.run(id);
-    packageIds.forEach((linkedPackageId) => {
-      insertProjectPackageStmt.run({
+    await assertProjectNameAvailable(name, id);
+    await updateProjectStmt.run({ id, name, icon, packageId, updatedAt: now });
+    await deleteProjectPackagesStmt.run(id);
+    await Promise.all(packageIds.map(async linkedPackageId => {
+      await insertProjectPackageStmt.run({
         projectId: id,
         packageId: linkedPackageId,
         createdAt: now,
       });
-    });
-    db.exec("COMMIT");
+    }));
+    await db.exec("COMMIT");
   } catch (error) {
-    try { db.exec("ROLLBACK"); } catch {}
+    try { await db.exec("ROLLBACK"); } catch {}
     if (String(error?.message || "").includes("UNIQUE constraint failed")) {
       throw httpError(409, "项目名称已存在");
     }
     throw error;
   }
   invalidateScorerQueryCaches();
-  return projectDto(selectProjectByIdStmt.get(id));
+  return await projectDto(await selectProjectByIdStmt.get(id));
 }
 
-function listVisibleProjects(user, query = {}) {
+async function listVisibleProjects(user, query = {}) {
   if (user?.role === "admin") {
-    return hasPaginationQuery(query) ? listProjectsPage(query) : listProjects();
+    return hasPaginationQuery(query) ? await listProjectsPage(query) : await listProjects();
   }
-  const rows = db
+  const rows = await db
     .prepare(`
       SELECT DISTINCT ${projectSelectColumns}
       FROM projects
@@ -3228,31 +3221,31 @@ function listVisibleProjects(user, query = {}) {
       ORDER BY projects.createdAt DESC, projects.id ASC
     `)
     .all(taskVersion, user?.username || "");
-  return mapProjectRows(rows);
+  return await mapProjectRows(rows);
 }
 
-function deleteProject(id) {
-  const project = getProjectOrThrow(id);
+async function deleteProject(id) {
+  const project = await getProjectOrThrow(id);
   const activeJobId = activeTaskGenerationBySubject.get(project._id);
   const activeJob = activeJobId ? taskGenerationJobs.get(activeJobId) : null;
   if (activeJob && ["queued", "running"].includes(activeJob.status)) {
     throw httpError(409, "任务正在生成，请等待生成完成后再删除项目");
   }
 
-  db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN IMMEDIATE");
   try {
-    const deletedTaskCount = deleteUncompletedProjectTasksStmt.run(project._id).changes;
-    deleteProjectUserLinksStmt.run(project._id);
-    if (!deleteProjectStmt.run(project._id).changes) {
+    const deletedTaskCount = (await deleteUncompletedProjectTasksStmt.run(project._id)).changes;
+    await deleteProjectUserLinksStmt.run(project._id);
+    if (!(await deleteProjectStmt.run(project._id)).changes) {
       throw httpError(404, "项目不存在");
     }
-    db.exec("COMMIT");
+    await db.exec("COMMIT");
     invalidateTaskSummaryCaches(project._id);
     invalidateScorerQueryCaches();
     return { deleted: true, deletedTaskCount };
   } catch (error) {
     try {
-      db.exec("ROLLBACK");
+      await db.exec("ROLLBACK");
     } catch {}
     throw error;
   }
@@ -3264,17 +3257,17 @@ function queueSubjectDeletion(subjectId) {
   if (queuedSubjectDeletionIds.has(subjectId)) return;
 
   queuedSubjectDeletionIds.add(subjectId);
-  setImmediate(() => {
-    void deleteQueuedSubject(subjectId);
+  setImmediate(async () => {
+    void (await deleteQueuedSubject(subjectId));
   });
 }
 
 async function deleteQueuedSubject(subjectId) {
   try {
-    const subject = selectSubjectPendingDeletionStmt.get(subjectId);
+    const subject = await selectSubjectPendingDeletionStmt.get(subjectId);
     if (!subject) return;
 
-    const images = selectSubjectStoragePathsStmt.all(subjectId);
+    const images = await selectSubjectStoragePathsStmt.all(subjectId);
     if (subject.storageRoot) {
       await fs
         .rm(path.join(uploadDir, subject.storageRoot), {
@@ -3290,14 +3283,14 @@ async function deleteQueuedSubject(subjectId) {
       );
     }
 
-    db.exec("BEGIN IMMEDIATE");
+    await db.exec("BEGIN IMMEDIATE");
     try {
-      deleteQueuedSubjectStmt.run(subjectId);
-      db.exec("COMMIT");
+      await deleteQueuedSubjectStmt.run(subjectId);
+      await db.exec("COMMIT");
       invalidateScorerQueryCaches();
     } catch (error) {
       try {
-        db.exec("ROLLBACK");
+        await db.exec("ROLLBACK");
       } catch {}
       throw error;
     }
@@ -3308,23 +3301,23 @@ async function deleteQueuedSubject(subjectId) {
   }
 }
 
-function assertPackageCanBeDeleted(packageId) {
-  const projectCount = selectPackageProjectCountStmt.get(packageId).total;
+async function assertPackageCanBeDeleted(packageId) {
+  const projectCount = (await selectPackageProjectCountStmt.get(packageId)).total;
   if (projectCount) {
     throw httpError(409, "该图包已关联项目，无法删除；请先删除未开始的项目");
   }
 }
 
-function userDto(row) {
+async function userDto(row) {
   return row
     ? {
         id: row.id,
         username: row.username,
         role: row.role,
-        teams: row.role === "scorer" ? selectUserTeamsStmt.all(row.id).map(teamDto) : [],
+        teams: row.role === "scorer" ? (await selectUserTeamsStmt.all(row.id)).map(teamDto) : [],
         status: row.status || "enabled",
         disabledByTeam: row.role === "scorer"
-          ? Boolean(selectDisabledTeamForUserStmt.get(row.id))
+          ? Boolean(await selectDisabledTeamForUserStmt.get(row.id))
           : false,
         lastLoginAt: row.lastLoginAt ?? null,
         createdAt: row.createdAt,
@@ -3367,20 +3360,20 @@ function verifyPassword(password, storedPassword) {
   );
 }
 
-function scorerAvailabilityError(user) {
+async function scorerAvailabilityError(user) {
   if (!user || user.role !== "scorer") return null;
   if ((user.status || "enabled") !== "enabled") {
     return httpError(403, "账号已禁用，请联系管理员");
   }
-  const disabledTeam = selectDisabledTeamForUserStmt.get(user.id);
+  const disabledTeam = await selectDisabledTeamForUserStmt.get(user.id);
   if (disabledTeam) {
     return httpError(403, `所属团队“${disabledTeam.name}”已禁用，无法登录`);
   }
   return null;
 }
 
-function assertScorerAssignable(user, scorerName = user?.username) {
-  const error = scorerAvailabilityError(user);
+async function assertScorerAssignable(user, scorerName = user?.username) {
+  const error = await scorerAvailabilityError(user);
   if (!error) return;
   const message = String(error.message || "账号不可用").replace("，无法登录", "");
   throw httpError(400, `打分人 ${scorerName || ""}${message ? `：${message}` : "不可用"}`);
@@ -3404,12 +3397,12 @@ function sessionTokenHash(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-function createSession(user) {
+async function createSession(user) {
   const token = crypto.randomBytes(32).toString("base64url");
   const createdAt = nowIso();
   const expiresAt = new Date(Date.now() + sessionDurationMs).toISOString();
-  deleteExpiredSessionsStmt.run(createdAt);
-  insertSessionStmt.run({
+  await deleteExpiredSessionsStmt.run(createdAt);
+  await insertSessionStmt.run({
     tokenHash: sessionTokenHash(token),
     userId: user.id,
     createdAt,
@@ -3439,12 +3432,12 @@ function clearSessionCookie(res) {
   });
 }
 
-function touchSessionSeenAt(tokenHash) {
+async function touchSessionSeenAt(tokenHash) {
   const now = Date.now();
   const lastWriteAt = sessionSeenWriteAt.get(tokenHash) || 0;
   if (now - lastWriteAt < sessionSeenWriteIntervalMs) return;
 
-  updateSessionSeenStmt.run(new Date(now).toISOString(), tokenHash);
+  await updateSessionSeenStmt.run(new Date(now).toISOString(), tokenHash);
   sessionSeenWriteAt.set(tokenHash, now);
 
   if (sessionSeenWriteAt.size > 10000) {
@@ -3456,27 +3449,27 @@ function touchSessionSeenAt(tokenHash) {
   }
 }
 
-function requireAuth(req, _res, next) {
+async function requireAuth(req, _res, next) {
   if (req.method === "OPTIONS") return next();
   const token = cookieValue(req.headers.cookie, "image_rating_session");
   if (!token) return next(httpError(401, "请先登录"));
 
   const tokenHash = sessionTokenHash(token);
-  const user = selectSessionUserStmt.get(tokenHash, nowIso());
+  const user = await selectSessionUserStmt.get(tokenHash, nowIso());
   if (!user) {
-    deleteSessionStmt.run(tokenHash);
+    await deleteSessionStmt.run(tokenHash);
     sessionSeenWriteAt.delete(tokenHash);
     return next(httpError(401, "登录已过期，请重新登录"));
   }
-  const availabilityError = scorerAvailabilityError(user);
+  const availabilityError = await scorerAvailabilityError(user);
   if (availabilityError) {
-    deleteSessionStmt.run(tokenHash);
+    await deleteSessionStmt.run(tokenHash);
     sessionSeenWriteAt.delete(tokenHash);
     return next(availabilityError);
   }
 
-  touchSessionSeenAt(tokenHash);
-  req.auth = userDto(user);
+  await touchSessionSeenAt(tokenHash);
+  req.auth = await userDto(user);
   return next();
 }
 
@@ -3493,13 +3486,13 @@ function requireScorer(req, _res, next) {
   return next();
 }
 
-function assertSubjectAccess(subjectId, user) {
-  const project = selectProjectByIdStmt.get(subjectId);
+async function assertSubjectAccess(subjectId, user) {
+  const project = await selectProjectByIdStmt.get(subjectId);
   if (!project) {
-    const subject = selectSubjectByIdStmt.get(subjectId);
+    const subject = await selectSubjectByIdStmt.get(subjectId);
     if (!subject) throw httpError(404, "项目不存在");
     if (user?.role === "admin") return subject;
-    const assignedToPackage = db
+    const assignedToPackage = await db
       .prepare(
         `SELECT 1 FROM rating_tasks
          WHERE subjectId = ? AND scorer = ? AND status IN ('assigned', 'completed')
@@ -3511,7 +3504,7 @@ function assertSubjectAccess(subjectId, user) {
   }
   if (user?.role === "admin") return project;
 
-  const assigned = db
+  const assigned = await db
     .prepare(
       `SELECT 1 FROM rating_tasks
        WHERE projectId = ? AND scorer = ? AND status IN ('assigned', 'completed')
@@ -3522,9 +3515,9 @@ function assertSubjectAccess(subjectId, user) {
   return project;
 }
 
-function listVisibleSubjects(user) {
-  if (user?.role === "admin") return selectSubjectsStmt.all();
-  return db
+async function listVisibleSubjects(user) {
+  if (user?.role === "admin") return await selectSubjectsStmt.all();
+  return await db
     .prepare(
       `SELECT DISTINCT
          subjects.id AS _id,
@@ -3566,49 +3559,47 @@ function ensureFileAccess(req, _res, next) {
   return next();
 }
 
-function parseProjectId(value) {
+async function parseProjectId(value) {
   const text = String(value ?? "").trim();
   if (!text) throw httpError(400, "请选择项目");
-  return getProjectOrThrow(text)._id;
+  return (await getProjectOrThrow(text))._id;
 }
 
-function loginUser(body = {}) {
+async function loginUser(body = {}) {
   const username = normalizeUsername(body.username);
   const password = String(body.password ?? "");
   if (!password) throw httpError(401, "用户名或密码不正确");
 
   const now = nowIso();
   if (username === "admin") {
-    const admin = selectUserAuthByUsernameStmt.get(username);
+    const admin = await selectUserAuthByUsernameStmt.get(username);
     if (
       !admin ||
       admin.role !== "admin" ||
       !verifyPassword(password, admin.password)
     )
       throw httpError(401, "用户名或密码不正确");
-    updateUserLoginStmt.run({ id: admin.id, lastLoginAt: now, updatedAt: now });
-    return userDto(selectUserByUsernameStmt.get(username));
+    await updateUserLoginStmt.run({ id: admin.id, lastLoginAt: now, updatedAt: now });
+    return await userDto(await selectUserByUsernameStmt.get(username));
   }
 
-  const scorer = selectScorerByUsernameStmt.get(username);
+  const scorer = await selectScorerByUsernameStmt.get(username);
   if (
     !scorer ||
     scorer.role !== "scorer" ||
     !verifyPassword(password, scorer.password)
   )
     throw httpError(401, "用户名或密码不正确");
-  const availabilityError = scorerAvailabilityError(scorer);
+  const availabilityError = await scorerAvailabilityError(scorer);
   if (availabilityError) throw availabilityError;
-  updateUserLoginStmt.run({ id: scorer.id, lastLoginAt: now, updatedAt: now });
-  return userDto(selectUserByIdStmt.get(scorer.id));
+  await updateUserLoginStmt.run({ id: scorer.id, lastLoginAt: now, updatedAt: now });
+  return await userDto(await selectUserByIdStmt.get(scorer.id));
 }
 
-function listScorerUsers(query = {}) {
+async function listScorerUsers(query = {}) {
   const { page, pageSize } = parseTaskPagination(query);
   const username = String(query.username ?? "").trim();
-  const teamIds = normalizeTeamIds(
-    parseQueryList(query.teamIds ?? query.teamId),
-  );
+  const teamIds = await normalizeTeamIds(parseQueryList(query.teamIds ?? query.teamId));
   const lastLoginStart = parseOptionalDateFilter(
     query.lastLoginStart ?? query.loginStart,
     "登录开始日期",
@@ -3648,10 +3639,10 @@ function listScorerUsers(query = {}) {
   }
 
   const where = `WHERE ${clauses.join(" AND ")}`;
-  const total = db
+  const total = (await db
     .prepare(`SELECT COUNT(*) AS total FROM users ${where}`)
-    .get(...params).total;
-  const rows = db
+    .get(...params)).total;
+  const rows = await db
     .prepare(
       `SELECT ${userSelectColumns}
        FROM users
@@ -3664,23 +3655,23 @@ function listScorerUsers(query = {}) {
     total,
     page,
     pageSize,
-    users: rows.map((user) => userDto(user)),
+    users: await Promise.all(rows.map(async user => await userDto(user))),
   };
 }
 
-function createScorerUser(body = {}) {
+async function createScorerUser(body = {}) {
   const username = normalizeUsername(body.username);
   const password = parseUserPassword(body.password);
   const teamNames = normalizeTeamNames(body.teamNames);
   if (username === "admin") throw httpError(409, "admin 是管理员账号");
   const now = nowIso();
-  db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN IMMEDIATE");
   try {
-    if (selectUserByUsernameStmt.get(username)) {
+    if (await selectUserByUsernameStmt.get(username)) {
       throw httpError(409, "账号已存在");
     }
     const id = crypto.randomUUID();
-    insertScorerUserStmt.run({
+    await insertScorerUserStmt.run({
       id,
       username,
       password: hashPassword(password),
@@ -3688,13 +3679,13 @@ function createScorerUser(body = {}) {
       createdAt: now,
       updatedAt: now,
     });
-    syncUserTeams(id, teamNames, now);
-    const user = selectScorerByUsernameStmt.get(username);
-    db.exec("COMMIT");
-    return userDto(selectUserByIdStmt.get(user.id));
+    await syncUserTeams(id, teamNames, now);
+    const user = await selectScorerByUsernameStmt.get(username);
+    await db.exec("COMMIT");
+    return await userDto(await selectUserByIdStmt.get(user.id));
   } catch (error) {
     try {
-      db.exec("ROLLBACK");
+      await db.exec("ROLLBACK");
     } catch {}
     if (
       String(error?.message || "").includes(
@@ -3725,7 +3716,7 @@ function normalizeBatchUsernames(value) {
   return usernames;
 }
 
-function createScorerUsers(body = {}) {
+async function createScorerUsers(body = {}) {
   const usernames = normalizeBatchUsernames(body.usernames);
   const password = parseUserPassword(body.password);
   const teamNames = normalizeTeamNames(body.teamNames);
@@ -3733,16 +3724,16 @@ function createScorerUsers(body = {}) {
   const created = [];
   const now = nowIso();
 
-  db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN IMMEDIATE");
   try {
     for (const username of usernames) {
-      if (selectUserByUsernameStmt.get(username)) {
+      if (await selectUserByUsernameStmt.get(username)) {
         skipped.push({ username, reason: "账号已存在" });
         continue;
       }
 
       const id = crypto.randomUUID();
-      insertScorerUserStmt.run({
+      await insertScorerUserStmt.run({
         id,
         username,
         password: hashPassword(password),
@@ -3750,13 +3741,13 @@ function createScorerUsers(body = {}) {
         createdAt: now,
         updatedAt: now,
       });
-      syncUserTeams(id, teamNames, now);
-      created.push(userDto(selectUserByIdStmt.get(id)));
+      await syncUserTeams(id, teamNames, now);
+      created.push(await userDto(await selectUserByIdStmt.get(id)));
     }
-    db.exec("COMMIT");
+    await db.exec("COMMIT");
   } catch (error) {
     try {
-      db.exec("ROLLBACK");
+      await db.exec("ROLLBACK");
     } catch {}
     if (
       String(error?.message || "").includes(
@@ -3776,8 +3767,8 @@ function createScorerUsers(body = {}) {
   };
 }
 
-function updateScorerUser(id, body = {}) {
-  const user = selectUserByIdStmt.get(String(id));
+async function updateScorerUser(id, body = {}) {
+  const user = await selectUserByIdStmt.get(String(id));
   if (!user || user.role !== "scorer") throw httpError(404, "打分账号不存在");
   const passwordValue = String(body.password ?? "").trim();
   if (passwordValue.length > 100) throw httpError(400, "密码不能超过 100 字");
@@ -3785,21 +3776,21 @@ function updateScorerUser(id, body = {}) {
   const shouldSyncTeams = Object.hasOwn(body, "teamNames");
   const teamNames = shouldSyncTeams ? normalizeTeamNames(body.teamNames) : [];
   const now = nowIso();
-  db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN IMMEDIATE");
   try {
-    updateScorerUserStmt.run({
+    await updateScorerUserStmt.run({
       id: user.id,
       password: passwordValue ? hashPassword(passwordValue) : null,
       status,
       updatedAt: now,
     });
-    if (shouldSyncTeams) syncUserTeams(user.id, teamNames, now);
-    db.exec("COMMIT");
+    if (shouldSyncTeams) await syncUserTeams(user.id, teamNames, now);
+    await db.exec("COMMIT");
   } catch (error) {
-    try { db.exec("ROLLBACK"); } catch {}
+    try { await db.exec("ROLLBACK"); } catch {}
     throw error;
   }
-  return userDto(selectUserByIdStmt.get(user.id));
+  return await userDto(await selectUserByIdStmt.get(user.id));
 }
 
 function normalizeTeamMatchMode(value) {
@@ -3810,7 +3801,7 @@ function normalizeTeamMatchMode(value) {
   return mode;
 }
 
-function listScorersByTeamIds(teamIds, matchMode = "all") {
+async function listScorersByTeamIds(teamIds, matchMode = "all") {
   if (!teamIds.length) return [];
   const normalizedMatchMode = normalizeTeamMatchMode(matchMode);
   const matchClause = normalizedMatchMode === "all"
@@ -3819,7 +3810,7 @@ function listScorersByTeamIds(teamIds, matchMode = "all") {
   const params = normalizedMatchMode === "all"
     ? [...teamIds, teamIds.length]
     : teamIds;
-  return db
+  return (await db
     .prepare(
       `SELECT users.id, users.username
        FROM users
@@ -3838,23 +3829,21 @@ function listScorersByTeamIds(teamIds, matchMode = "all") {
        ${matchClause}
        ORDER BY users.username COLLATE NOCASE ASC`,
     )
-    .all(...params)
+    .all(...params))
     .map((user) => ({ id: user.id, username: user.username }));
 }
 
-function deleteScorerUser(id) {
-  const user = selectUserByIdStmt.get(String(id));
+async function deleteScorerUser(id) {
+  const user = await selectUserByIdStmt.get(String(id));
   if (!user || user.role !== "scorer") throw httpError(404, "打分账号不存在");
-  const assignedTaskCount = selectAssignedTaskCountByScorerStmt.get(
-    user.username,
-  ).total;
+  const assignedTaskCount = (await selectAssignedTaskCountByScorerStmt.get(user.username)).total;
   if (assignedTaskCount > 0) {
     throw httpError(
       409,
       `该账号仍有 ${assignedTaskCount} 个未完成任务，请先重新分配任务`,
     );
   }
-  const result = deleteScorerUserStmt.run(String(id));
+  const result = await deleteScorerUserStmt.run(String(id));
   if (result.changes === 0) throw httpError(404, "打分账号不存在");
   return { deleted: true };
 }
@@ -3911,7 +3900,7 @@ async function hydrateSubjectTaskTemplates(templates) {
       );
       itemRowsStmtCache.set(batch.length, stmt);
     }
-    itemRows.push(...stmt.all(...batch));
+    itemRows.push(...(await stmt.all(...batch)));
     if (start + batch.length < templateIds.length) {
       await yieldToEventLoop();
     }
@@ -3931,8 +3920,8 @@ async function hydrateSubjectTaskTemplates(templates) {
 
 async function loadSubjectTaskTemplates(subjectId, limit = null) {
   const templates = limit == null
-    ? selectSubjectTaskTemplatesStmt.all(subjectId)
-    : db.prepare(`
+    ? await selectSubjectTaskTemplatesStmt.all(subjectId)
+    : await db.prepare(`
         SELECT id, subjectId, sourceTaskId, round, criterion, imageKey, selectionKey
         FROM subject_task_templates
         WHERE subjectId = ?
@@ -3943,9 +3932,9 @@ async function loadSubjectTaskTemplates(subjectId, limit = null) {
 }
 
 async function loadProjectTaskTemplates(projectId) {
-  const project = selectProjectByIdStmt.get(projectId);
+  const project = await selectProjectByIdStmt.get(projectId);
   if (!project) throw httpError(404, "项目不存在");
-  const packageIds = projectPackageIds(project);
+  const packageIds = await projectPackageIds(project);
   if (!packageIds.length) return [];
 
   const templates = [];
@@ -3964,12 +3953,12 @@ async function loadUnmaterializedProjectTaskTemplates(projectId, limit) {
   const requestedLimit = Math.max(0, Math.floor(Number(limit) || 0));
   if (!requestedLimit) return [];
 
-  const project = selectProjectByIdStmt.get(projectId);
+  const project = await selectProjectByIdStmt.get(projectId);
   if (!project) throw httpError(404, "项目不存在");
-  const packageIds = projectPackageIds(project);
+  const packageIds = await projectPackageIds(project);
   if (!packageIds.length) return [];
 
-  const templates = db.prepare(`
+  const templates = await db.prepare(`
     SELECT
       subject_task_templates.id,
       subject_task_templates.subjectId,
@@ -3994,7 +3983,14 @@ async function loadUnmaterializedProjectTaskTemplates(projectId, limit) {
     ORDER BY subject_task_templates.selectionKey ASC,
              subject_task_templates.id ASC
     LIMIT ?
-  `).all(projectId, taskVersion, projectId, projectId, ...packageIds, requestedLimit);
+  `).all(
+    projectId,
+    taskVersion,
+    projectId,
+    projectId,
+    ...packageIds,
+    requestedLimit
+  );
 
   return (await hydrateSubjectTaskTemplates(templates)).map((template) => ({
     ...template,
@@ -4030,7 +4026,7 @@ function buildGeneratedTaskRecord(projectId, template, scorer) {
   };
 }
 
-function bulkInsertRatingTasks(taskRows) {
+async function bulkInsertRatingTasks(taskRows) {
   if (!taskRows.length) return 0;
   const sql = `
     INSERT OR IGNORE INTO rating_tasks (
@@ -4055,10 +4051,10 @@ function bulkInsertRatingTasks(taskRows) {
       row.updatedAt,
     );
   });
-  return db.prepare(sql).run(...params).changes;
+  return (await db.prepare(sql).run(...params)).changes;
 }
 
-function bulkInsertRatingTaskItems(itemRows) {
+async function bulkInsertRatingTaskItems(itemRows) {
   if (!itemRows.length) return 0;
   const sql = `
     INSERT OR IGNORE INTO rating_task_items (taskId, imageId, position, role)
@@ -4068,7 +4064,7 @@ function bulkInsertRatingTaskItems(itemRows) {
   itemRows.forEach((row) => {
     params.push(row.taskId, row.imageId, row.position, row.role);
   });
-  return db.prepare(sql).run(...params).changes;
+  return (await db.prepare(sql).run(...params)).changes;
 }
 
 function compressTaskAllocations(plan) {
@@ -4190,13 +4186,13 @@ function parseStoredTaskRankingRelations(value) {
   }
 }
 
-function hydrateTaskRows(rows) {
+async function hydrateTaskRows(rows) {
   const taskIds = rows.map((row) => row.id);
   const itemsByTaskId = new Map();
 
   if (taskIds.length) {
     const taskIdPlaceholders = placeholders(taskIds.length);
-    const itemRows = db
+    const itemRows = await db
       .prepare(
         `
       SELECT taskId, imageId, position, role
@@ -4210,7 +4206,7 @@ function hydrateTaskRows(rows) {
     const imageById = new Map();
 
     if (imageIds.length) {
-      const imageRows = db
+      const imageRows = await db
         .prepare(
           `
         SELECT ${taskImageSelectColumns}
@@ -4312,13 +4308,13 @@ const {
   rollbackJobDto,
 } = adminScoringService;
 
-function hydrateTaskListRows(rows) {
+async function hydrateTaskListRows(rows) {
   const taskIds = rows.map((row) => row.id);
   const itemsByTaskId = new Map();
 
   if (taskIds.length) {
     const taskIdPlaceholders = placeholders(taskIds.length);
-    const itemRows = db
+    const itemRows = await db
       .prepare(
         `
       SELECT taskId, imageId, position
@@ -4332,7 +4328,7 @@ function hydrateTaskListRows(rows) {
     const imageById = new Map();
 
     if (imageIds.length) {
-      const imageRows = db
+      const imageRows = await db
         .prepare(
           `
         SELECT ${taskListImageSelectColumns}
@@ -4391,21 +4387,21 @@ function buildSubjectTaskFilter(projectId, query = {}) {
   };
 }
 
-function listSubjectTaskOptions(projectId) {
-  const scorers = db
+async function listSubjectTaskOptions(projectId) {
+  const scorers = (await db
     .prepare(
       `SELECT DISTINCT scorer
        FROM rating_tasks
        WHERE projectId = ? AND taskVersion = ? AND scorer IS NOT NULL AND scorer <> ''
        ORDER BY scorer COLLATE NOCASE ASC`,
     )
-    .all(projectId, taskVersion)
+    .all(projectId, taskVersion))
     .map((row) => row.scorer);
 
   return { scorers };
 }
 
-function listSubjectTasks(projectId, query = {}) {
+async function listSubjectTasks(projectId, query = {}) {
   const { page, pageSize } = parseTaskPagination(query);
   const filter = buildSubjectTaskFilter(projectId, query);
   const cursor = parseTaskCursor(query.cursor);
@@ -4426,16 +4422,16 @@ function listSubjectTasks(projectId, query = {}) {
     : "total";
   const statsTotal =
     !query.scorer && !query.criterion
-      ? getProjectTaskStats(projectId)[statusKey]
+      ? (await getProjectTaskStats(projectId))[statusKey]
       : null;
   const total = statsTotal != null
     ? statsTotal
     : includeTaskTotal(query)
-      ? db
+      ? (await db
         .prepare(`SELECT COUNT(*) AS total FROM rating_tasks ${filter.where}`)
-        .get(...filter.params).total
+        .get(...filter.params)).total
       : null;
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT id, taskType, status, scorer, createdAt
        FROM rating_tasks
@@ -4444,14 +4440,9 @@ function listSubjectTasks(projectId, query = {}) {
        ORDER BY taskType ASC, createdAt ASC, id ASC
        LIMIT ?${cursor ? "" : " OFFSET ?"}`,
     )
-    .all(
-      ...filter.params,
-      ...(cursor
-        ? [cursor.taskType, cursor.taskType, cursor.createdAt, cursor.createdAt, cursor.id]
-        : []),
-      pageSize + 1,
-      ...(cursor ? [] : [(page - 1) * pageSize]),
-    );
+    .all(...filter.params, ...(cursor
+    ? [cursor.taskType, cursor.taskType, cursor.createdAt, cursor.createdAt, cursor.id]
+    : []), pageSize + 1, ...(cursor ? [] : [(page - 1) * pageSize]));
   const hasMore = rows.length > pageSize;
   const pageRows = rows.slice(0, pageSize);
   const lastRow = pageRows[pageRows.length - 1];
@@ -4462,7 +4453,7 @@ function listSubjectTasks(projectId, query = {}) {
     pageSize,
     hasMore,
     nextCursor: hasMore && lastRow ? serializeTaskCursor(lastRow) : null,
-    tasks: hydrateTaskListRows(pageRows).map((row) => ({
+    tasks: (await hydrateTaskListRows(pageRows)).map((row) => ({
       id: row.id,
       criterion: row.taskType.split(":")[1] || null,
       status: row.status,
@@ -4541,14 +4532,14 @@ function addReportSheet(workbook, name, headers, rows, widths) {
   return worksheet;
 }
 
-function getSubjectTaskReportSummary(subjectId) {
+async function getSubjectTaskReportSummary(subjectId) {
   const cached = subjectTaskReportCache.get(subjectId);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
 
-  const project = getProjectOrThrow(subjectId);
-  const packageIds = projectPackageIds(project);
+  const project = await getProjectOrThrow(subjectId);
+  const packageIds = await projectPackageIds(project);
 
-  const imageStats = db
+  const imageStats = await db
     .prepare(
       `SELECT COUNT(*) AS imageCount,
                COUNT(DISTINCT category) AS categoryCount
@@ -4556,14 +4547,14 @@ function getSubjectTaskReportSummary(subjectId) {
        WHERE subjectId IN (${placeholders(packageIds.length)})`,
     )
     .get(...packageIds);
-  const taskStats = getProjectTaskStats(subjectId);
+  const taskStats = await getProjectTaskStats(subjectId);
   const statusCounts = {
     pending: taskStats.pending,
     assigned: taskStats.assigned,
     completed: taskStats.completed,
   };
 
-  const dimensionRows = db
+  const dimensionRows = await db
     .prepare(
       `SELECT taskType, status, COUNT(*) AS count
        FROM rating_tasks
@@ -4589,7 +4580,7 @@ function getSubjectTaskReportSummary(subjectId) {
     dimensionMap.set(key, item);
   });
 
-  const scorerRows = db
+  const scorerRows = await db
     .prepare(
       `SELECT COALESCE(NULLIF(TRIM(scorer), ''), '未分配') AS scorer,
               status, COUNT(*) AS count,
@@ -4599,7 +4590,7 @@ function getSubjectTaskReportSummary(subjectId) {
        GROUP BY COALESCE(NULLIF(TRIM(scorer), ''), '未分配'), status`,
     )
     .all(subjectId, taskVersion);
-  const scorerCriteriaRows = db
+  const scorerCriteriaRows = await db
     .prepare(
       `SELECT DISTINCT COALESCE(NULLIF(TRIM(scorer), ''), '未分配') AS scorer,
               taskType
@@ -4677,7 +4668,7 @@ function getSubjectTaskReportSummary(subjectId) {
 }
 
 async function exportSubjectTaskReport(subjectId, res) {
-  const report = getSubjectTaskReportSummary(subjectId);
+  const report = await getSubjectTaskReportSummary(subjectId);
   const subject = report.subject;
   const imageStats = {
     imageCount: report.imageCount,
@@ -4803,17 +4794,17 @@ async function exportSubjectTaskReport(subjectId, res) {
   res.send(file);
 }
 
-function scorerTaskScope(query = {}) {
+async function scorerTaskScope(query = {}) {
   const scorer = parseScorerName(query.scorer);
   if (!scorer) throw httpError(400, "缺少打分人");
-  const projectId = query.projectId ? parseProjectId(query.projectId) : null;
-  if (!selectScorerByUsernameStmt.get(scorer))
+  const projectId = query.projectId ? await parseProjectId(query.projectId) : null;
+  if (!(await selectScorerByUsernameStmt.get(scorer)))
     throw httpError(404, "打分账号不存在");
   return { scorer, projectId };
 }
 
-function buildScorerTaskFilter(query = {}) {
-  const { scorer, projectId } = scorerTaskScope(query);
+async function buildScorerTaskFilter(query = {}) {
+  const { scorer, projectId } = await scorerTaskScope(query);
   const clauses = ["rating_tasks.taskVersion = ?", "rating_tasks.scorer = ?"];
   const params = [taskVersion, scorer];
   const status = String(query.status || "");
@@ -4870,7 +4861,7 @@ function invalidateScorerQueryCaches() {
   ]);
 }
 
-function listAssignedTasks(query = {}) {
+async function listAssignedTasks(query = {}) {
   const cacheKey = JSON.stringify({
     scorer: query.scorer || null,
     projectId: query.projectId || null,
@@ -4886,7 +4877,7 @@ function listAssignedTasks(query = {}) {
   const cached = assignedTaskListCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
 
-  const filter = buildScorerTaskFilter(query);
+  const filter = await buildScorerTaskFilter(query);
   const { page, pageSize } = parseTaskPagination(query);
   const criterionOrder = taskCriterionOrderSql("rating_tasks.taskType");
   const cursor = parseTaskCursor(query.cursor);
@@ -4905,11 +4896,11 @@ function listAssignedTasks(query = {}) {
        )`
     : "";
   const total = includeTaskTotal(query)
-    ? db
+    ? (await db
       .prepare(`SELECT COUNT(*) AS total FROM rating_tasks ${filter.where}`)
-      .get(...filter.params).total
+      .get(...filter.params)).total
     : null;
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT rating_tasks.id, rating_tasks.subjectId, rating_tasks.projectId,
               rating_tasks.taskType, rating_tasks.status,
@@ -4925,14 +4916,9 @@ function listAssignedTasks(query = {}) {
                 rating_tasks.id ASC
        LIMIT ?${useCursor ? "" : " OFFSET ?"}`,
     )
-    .all(
-      ...filter.params,
-      ...(!useCursor
-        ? []
-        : [cursorOrder, cursorOrder, cursor.createdAt, cursor.createdAt, cursor.id]),
-      pageSize + 1,
-      ...(useCursor ? [] : [(page - 1) * pageSize]),
-    );
+    .all(...filter.params, ...(!useCursor
+    ? []
+    : [cursorOrder, cursorOrder, cursor.createdAt, cursor.createdAt, cursor.id]), pageSize + 1, ...(useCursor ? [] : [(page - 1) * pageSize]));
   const hasMore = rows.length > pageSize;
   const pageRows = rows.slice(0, pageSize);
   const lastRow = pageRows[pageRows.length - 1];
@@ -4941,7 +4927,7 @@ function listAssignedTasks(query = {}) {
   );
   const hydratedRows = summaryOnly
     ? pageRows.map((row) => ({ ...row, items: [] }))
-    : hydrateTaskListRows(pageRows);
+    : await hydrateTaskListRows(pageRows);
 
   const value = {
     total,
@@ -4971,8 +4957,8 @@ function listAssignedTasks(query = {}) {
   return value;
 }
 
-function getTaskDetail(taskId, { projectId = null, scorer = null } = {}) {
-  const task = selectTaskByIdStmt.get(taskId);
+async function getTaskDetail(taskId, { projectId = null, scorer = null } = {}) {
+  const task = await selectTaskByIdStmt.get(taskId);
   if (!task || task.taskVersion !== taskVersion) {
     throw httpError(404, "任务不存在");
   }
@@ -4985,29 +4971,24 @@ function getTaskDetail(taskId, { projectId = null, scorer = null } = {}) {
   if (scorer && !["assigned", "completed"].includes(task.status)) {
     throw httpError(403, "当前任务不可查看");
   }
-  return hydrateTaskRows([task])[0];
+  return (await hydrateTaskRows([task]))[0];
 }
 
 const scorerDashboardCache = new Map();
 const scorerDashboardCacheTtlMs = 2 * 1000;
 
-function getScorerDashboard(query = {}) {
+async function getScorerDashboard(query = {}) {
   const scorer = parseScorerName(query.scorer);
   if (!scorer) throw httpError(400, "缺少打分人");
-  const projectId = query.projectId ? parseProjectId(query.projectId) : null;
-  if (!selectScorerByUsernameStmt.get(scorer))
+  const projectId = query.projectId ? await parseProjectId(query.projectId) : null;
+  if (!(await selectScorerByUsernameStmt.get(scorer)))
     throw httpError(404, "打分账号不存在");
 
   const cacheKey = `${scorer}:${projectId || "all"}`;
   const cached = scorerDashboardCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
 
-  const stats = selectScorerTaskStatsStmt.get(
-    taskVersion,
-    scorer,
-    projectId,
-    projectId,
-  );
+  const stats = await selectScorerTaskStatsStmt.get(taskVersion, scorer, projectId, projectId);
   const pendingTasks = Number(stats.pendingTasks || 0);
   const completedTasks = Number(stats.completedTasks || 0);
   const totalTasks = pendingTasks + completedTasks;
@@ -5016,7 +4997,7 @@ function getScorerDashboard(query = {}) {
     pendingTasks,
     completedTasks,
     totalTasks,
-    projectCount: selectScorerProjectCountStmt.get(taskVersion, scorer).total,
+    projectCount: (await selectScorerProjectCountStmt.get(taskVersion, scorer)).total,
     progress: totalTasks ? Math.round((completedTasks / totalTasks) * 100) : 0,
   };
   scorerDashboardCache.set(cacheKey, {
@@ -5150,10 +5131,10 @@ function parseTaskSubmissionMode(value, rankingActionCount, trackingProvided = f
   return trackingProvided ? "direct" : null;
 }
 
-function completeAssignedTask(taskId, body = {}) {
+async function completeAssignedTask(taskId, body = {}) {
   const scorer = parseScorerName(body.scorer);
   if (!scorer) throw httpError(400, "缺少打分人");
-  const task = selectTaskByIdStmt.get(taskId);
+  const task = await selectTaskByIdStmt.get(taskId);
   if (!task) throw httpError(404, "任务不存在");
   if (task.status === "completed") throw httpError(409, "该任务已完成");
   if (task.status !== "assigned" || task.scorer !== scorer)
@@ -5161,8 +5142,8 @@ function completeAssignedTask(taskId, body = {}) {
   if (body.projectId && String(body.projectId) !== (task.projectId || task.subjectId))
     throw httpError(400, "任务项目不匹配");
 
-  const taskImageIds = selectTaskImageIdsStmt
-    .all(task.id)
+  const taskImageIds = (await selectTaskImageIdsStmt
+    .all(task.id))
     .map((item) => item.imageId);
   const excludedImageIds = parseTaskExcludedImageIds(
     body.excludedImageIds,
@@ -5197,9 +5178,9 @@ function completeAssignedTask(taskId, body = {}) {
   const startedAt = new Date(Date.now() - durationMs).toISOString();
   const projectId = task.projectId || task.subjectId;
 
-  db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN IMMEDIATE");
   try {
-    const result = completeAssignedTaskStmt.run({
+    const result = await completeAssignedTaskStmt.run({
       id: task.id,
       scorer,
       ranking: JSON.stringify(ranking),
@@ -5215,10 +5196,10 @@ function completeAssignedTask(taskId, body = {}) {
     });
     if (result.changes === 0)
       throw httpError(409, "任务状态已变更，请刷新后重试");
-    db.exec("COMMIT");
+    await db.exec("COMMIT");
   } catch (error) {
     try {
-      db.exec("ROLLBACK");
+      await db.exec("ROLLBACK");
     } catch {}
     throw error;
   }
@@ -5226,22 +5207,22 @@ function completeAssignedTask(taskId, body = {}) {
   invalidateTaskSummaryCaches(projectId);
   invalidateScorerQueryCaches();
   queueProjectTaskSummary(projectId);
-  const updated = selectTaskByIdStmt.get(task.id);
-  return hydrateTaskRows([updated])[0];
+  const updated = await selectTaskByIdStmt.get(task.id);
+  return (await hydrateTaskRows([updated]))[0];
 }
 
-function updateCompletedTask(taskId, body = {}) {
+async function updateCompletedTask(taskId, body = {}) {
   const scorer = parseScorerName(body.scorer);
   if (!scorer) throw httpError(400, "缺少打分人");
-  const task = selectTaskByIdStmt.get(taskId);
+  const task = await selectTaskByIdStmt.get(taskId);
   if (!task) throw httpError(404, "任务不存在");
   if (task.status !== "completed" || task.scorer !== scorer)
     throw httpError(403, "只能修改已分配给当前打分人的已完成任务");
   if (body.projectId && String(body.projectId) !== (task.projectId || task.subjectId))
     throw httpError(400, "任务项目不匹配");
 
-  const taskImageIds = selectTaskImageIdsStmt
-    .all(task.id)
+  const taskImageIds = (await selectTaskImageIdsStmt
+    .all(task.id))
     .map((item) => item.imageId);
   const excludedImageIds = parseTaskExcludedImageIds(
     body.excludedImageIds,
@@ -5274,9 +5255,9 @@ function updateCompletedTask(taskId, body = {}) {
   );
   const editedAt = nowIso();
 
-  db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN IMMEDIATE");
   try {
-    const result = updateCompletedTaskStmt.run({
+    const result = await updateCompletedTaskStmt.run({
       id: task.id,
       scorer,
       ranking: JSON.stringify(ranking),
@@ -5291,18 +5272,18 @@ function updateCompletedTask(taskId, body = {}) {
     if (result.changes === 0)
       throw httpError(409, "任务状态已变更，请刷新后重试");
 
-    db.exec("COMMIT");
+    await db.exec("COMMIT");
   } catch (error) {
     try {
-      db.exec("ROLLBACK");
+      await db.exec("ROLLBACK");
     } catch {}
     throw error;
   }
 
   invalidateTaskSummaryCaches(task.projectId || task.subjectId);
   invalidateScorerQueryCaches();
-  const updated = selectTaskByIdStmt.get(task.id);
-  return hydrateTaskRows([updated])[0];
+  const updated = await selectTaskByIdStmt.get(task.id);
+  return (await hydrateTaskRows([updated]))[0];
 }
 
 function normalizeTaskAssigneeNames(value) {
@@ -5319,27 +5300,27 @@ function normalizeTaskAssigneeNames(value) {
   ];
 }
 
-function parseTaskAssignees(value) {
+async function parseTaskAssignees(value) {
   const names = normalizeTaskAssigneeNames(value);
   if (!names.length) throw httpError(400, "请选择打分人");
 
-  const users = names.map((name) => selectScorerByUsernameStmt.get(name));
+  const users = await Promise.all(names.map(async name => await selectScorerByUsernameStmt.get(name)));
   const missing = names.filter((_, index) => !users[index]);
   if (missing.length)
     throw httpError(400, `打分人不存在：${missing.join("、")}`);
-  users.forEach((user, index) => {
-    assertScorerAssignable(user, names[index]);
-  });
+  await Promise.all(users.map(async (user, index) => {
+    await assertScorerAssignable(user, names[index]);
+  }));
   return { names };
 }
 
-function parseTaskGenerationAssignees(body = {}) {
-  const teamIds = normalizeTeamIds(body.teamIds, {
+async function parseTaskGenerationAssignees(body = {}) {
+  const teamIds = await normalizeTeamIds(body.teamIds, {
     required: true,
     enabledOnly: true,
   });
   const teamMatchMode = normalizeTeamMatchMode(body.teamMatchMode);
-  const availableUsers = listScorersByTeamIds(teamIds, teamMatchMode);
+  const availableUsers = await listScorersByTeamIds(teamIds, teamMatchMode);
   if (!availableUsers.length) throw httpError(400, "所选团队没有可用的打分账号");
 
   if (!Array.isArray(body.allocations)) {
@@ -5496,30 +5477,30 @@ async function parseTaskAllocationWorkbook(file) {
   };
 }
 
-function getTaskReassignmentOptions(subjectId) {
-  getProjectOrThrow(subjectId);
-  const stats = getProjectTaskStats(subjectId);
+async function getTaskReassignmentOptions(subjectId) {
+  await getProjectOrThrow(subjectId);
+  const stats = await getProjectTaskStats(subjectId);
 
   return {
-    users: selectAvailableSubjectScorersStmt.all(subjectId).map(userDto),
+    users: (await selectAvailableSubjectScorersStmt.all(subjectId)).map(userDto),
     availableTaskCount: stats.pending,
-    sourceScorers: selectSubjectAssignedScorerCountsStmt
-      .all(subjectId, taskVersion)
+    sourceScorers: (await selectSubjectAssignedScorerCountsStmt
+      .all(subjectId, taskVersion))
       .map((row) => ({ username: row.scorer, taskCount: row.taskCount })),
   };
 }
 
-function reassignSubjectTasks(subjectId, body = {}) {
-  getProjectOrThrow(subjectId);
+async function reassignSubjectTasks(subjectId, body = {}) {
+  await getProjectOrThrow(subjectId);
 
   const source = String(body.source || "");
   if (source !== "assigned_uncompleted" && source !== "selected_scorers") {
     throw httpError(400, "任务来源不正确");
   }
 
-  const assignees = parseTaskAssignees(body.scorers);
+  const assignees = await parseTaskAssignees(body.scorers);
   const existingScorers = new Set(
-    selectSubjectScorerNamesStmt.all(subjectId).map((row) => row.scorer),
+    (await selectSubjectScorerNamesStmt.all(subjectId)).map((row) => row.scorer),
   );
   const existingAssignees = assignees.names.filter((name) =>
     existingScorers.has(name),
@@ -5540,8 +5521,8 @@ function reassignSubjectTasks(subjectId, body = {}) {
   }
 
   const availableTaskCount = source === "assigned_uncompleted"
-    ? getProjectTaskStats(subjectId).pending
-    : getProjectTaskStats(subjectId).assigned;
+    ? (await getProjectTaskStats(subjectId)).pending
+    : (await getProjectTaskStats(subjectId)).assigned;
   let assignmentPlan = null;
   if (source === "assigned_uncompleted") {
     if (!Array.isArray(body.allocations)) {
@@ -5579,11 +5560,7 @@ function reassignSubjectTasks(subjectId, body = {}) {
   }
   let selectedTasks;
   if (source === "assigned_uncompleted") {
-    const candidates = selectReassignableTaskIdsStmt.all(
-      subjectId,
-      taskVersion,
-      taskCount,
-    );
+    const candidates = await selectReassignableTaskIdsStmt.all(subjectId, taskVersion, taskCount);
     if (taskCount > candidates.length) {
       throw httpError(400, `任务数量不能超过 ${candidates.length}`);
     }
@@ -5605,8 +5582,8 @@ function reassignSubjectTasks(subjectId, body = {}) {
     }
 
     const sourceCounts = new Map(
-      selectSubjectAssignedScorerCountsStmt
-        .all(subjectId, taskVersion)
+      (await selectSubjectAssignedScorerCountsStmt
+        .all(subjectId, taskVersion))
         .map((row) => [row.scorer, row.taskCount]),
     );
     const invalidScorers = sourceScorers.filter(
@@ -5619,13 +5596,8 @@ function reassignSubjectTasks(subjectId, body = {}) {
       );
     }
 
-    selectedTasks = sourceScorers.flatMap((scorer) => {
-      const candidates = selectReassignableTaskIdsByScorerStmt.all(
-        subjectId,
-        taskVersion,
-        scorer,
-        taskCount,
-      );
+    selectedTasks = sourceScorers.flatMap(async scorer => {
+      const candidates = await selectReassignableTaskIdsByScorerStmt.all(subjectId, taskVersion, scorer, taskCount);
       if (taskCount > candidates.length) {
         throw httpError(
           400,
@@ -5644,20 +5616,20 @@ function reassignSubjectTasks(subjectId, body = {}) {
     assignees.names.map((name) => [name, 0]),
   );
 
-  db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN IMMEDIATE");
   try {
-    selectedTasks.forEach((task, index) => {
+    await Promise.all(selectedTasks.map(async (task, index) => {
       const scorer = assignmentPlan?.[index]
         || assignees.names[index % assignees.names.length];
       const result = source === "assigned_uncompleted"
-        ? assignUnassignedTaskStmt.run({
+        ? await assignUnassignedTaskStmt.run({
           id: task.id,
           projectId: subjectId,
           taskVersion,
           scorer,
           updatedAt,
         })
-        : reassignTaskStmt.run({
+        : await reassignTaskStmt.run({
           id: task.id,
           projectId: subjectId,
           taskVersion,
@@ -5668,11 +5640,11 @@ function reassignSubjectTasks(subjectId, body = {}) {
         throw httpError(409, "任务状态已变更，请刷新后重试");
       }
       distribution[scorer]++;
-    });
-    db.exec("COMMIT");
+    }));
+    await db.exec("COMMIT");
   } catch (error) {
     try {
-      db.exec("ROLLBACK");
+      await db.exec("ROLLBACK");
     } catch {}
     throw error;
   }
@@ -5698,11 +5670,7 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
     };
   }
 
-  const pendingTasks = selectPendingProjectTaskIdsStmt.all(
-    projectId,
-    taskVersion,
-    requestedTaskCount,
-  );
+  const pendingTasks = await selectPendingProjectTaskIdsStmt.all(projectId, taskVersion, requestedTaskCount);
   if (requestedTaskCount > pendingTasks.length) {
     throw httpError(400, `分配数量不能超过 ${pendingTasks.length} 个可用任务`);
   }
@@ -5716,7 +5684,7 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
 
   for (let start = 0; start < selectedTasks.length; start += TASK_ASSIGN_BATCH_SIZE) {
     const batch = selectedTasks.slice(start, start + TASK_ASSIGN_BATCH_SIZE);
-    db.exec("BEGIN IMMEDIATE");
+    await db.exec("BEGIN IMMEDIATE");
     try {
       const whenClauses = batch.map(() => "WHEN ? THEN ?");
       const taskIds = batch.map((task) => task.id);
@@ -5725,7 +5693,7 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
         assignmentParams.push(task.id, assigneePlan[start + index]);
       });
       assignmentParams.push(updatedAt, ...taskIds);
-      const result = db
+      const result = await db
         .prepare(
           `UPDATE rating_tasks
            SET scorer = CASE id ${whenClauses.join(" ")} ELSE scorer END,
@@ -5738,10 +5706,10 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
       if (result.changes !== batch.length) {
         throw httpError(409, "任务状态已变更，请刷新后重试");
       }
-      db.exec("COMMIT");
+      await db.exec("COMMIT");
     } catch (error) {
       try {
-        db.exec("ROLLBACK");
+        await db.exec("ROLLBACK");
       } catch {}
       throw error;
     }
@@ -5759,13 +5727,13 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
   };
 }
 
-function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus, assignedTaskIds = []) {
+async function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus, assignedTaskIds = []) {
   try {
     for (let start = 0; start < assignedTaskIds.length; start += TASK_ASSIGN_BATCH_SIZE) {
       const batch = assignedTaskIds.slice(start, start + TASK_ASSIGN_BATCH_SIZE);
-      db.exec("BEGIN IMMEDIATE");
+      await db.exec("BEGIN IMMEDIATE");
       try {
-        db.prepare(
+        await db.prepare(
           `UPDATE rating_tasks
            SET status = 'pending',
                scorer = NULL,
@@ -5774,32 +5742,32 @@ function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus, assigned
              AND id IN (${placeholders(batch.length)})
              AND status = 'assigned'`,
         ).run(nowIso(), projectId, ...batch);
-        db.exec("COMMIT");
+        await db.exec("COMMIT");
       } catch (error) {
         try {
-          db.exec("ROLLBACK");
+          await db.exec("ROLLBACK");
         } catch {}
         throw error;
       }
     }
     for (let start = 0; start < taskIds.length; start += TASK_WRITE_BATCH_SIZE) {
       const batch = taskIds.slice(start, start + TASK_WRITE_BATCH_SIZE);
-      db.exec("BEGIN IMMEDIATE");
+      await db.exec("BEGIN IMMEDIATE");
       try {
-        db.prepare(
+        await db.prepare(
           `DELETE FROM rating_tasks
            WHERE projectId = ?
              AND id IN (${placeholders(batch.length)})`,
         ).run(projectId, ...batch);
-        db.exec("COMMIT");
+        await db.exec("COMMIT");
       } catch (error) {
         try {
-          db.exec("ROLLBACK");
+          await db.exec("ROLLBACK");
         } catch {}
         throw error;
       }
     }
-    updateProjectTaskStatusStmt.run({
+    await updateProjectTaskStatusStmt.run({
       id: projectId,
       taskStatus: previousTaskStatus,
       updatedAt: nowIso(),
@@ -5812,7 +5780,7 @@ function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus, assigned
 }
 
 async function generateSubjectTasks(projectId, assignment, onProgress) {
-  const project = getProjectOrThrow(projectId);
+  const project = await getProjectOrThrow(projectId);
   const requestedTaskCount = assignment.allocations.reduce(
     (total, allocation) => total + allocation.taskCount,
     0,
@@ -5827,7 +5795,7 @@ async function generateSubjectTasks(projectId, assignment, onProgress) {
   try {
     let createdCount = 0;
     let assignedCount = 0;
-    const pendingBefore = getProjectTaskStats(projectId).pending;
+    const pendingBefore = (await getProjectTaskStats(projectId)).pending;
     const templatesNeeded = Math.max(0, requestedTaskCount - pendingBefore);
     const templates = templatesNeeded
       ? await loadUnmaterializedProjectTaskTemplates(projectId, templatesNeeded)
@@ -5860,16 +5828,16 @@ async function generateSubjectTasks(projectId, assignment, onProgress) {
       );
       const itemRows = taskRows.flatMap((task) => task.items);
 
-      db.exec("BEGIN IMMEDIATE");
+      await db.exec("BEGIN IMMEDIATE");
       try {
-        const result = bulkInsertRatingTasks(taskRows);
-        bulkInsertRatingTaskItems(itemRows);
-        db.exec("COMMIT");
+        const result = await bulkInsertRatingTasks(taskRows);
+        await bulkInsertRatingTaskItems(itemRows);
+        await db.exec("COMMIT");
         createdCount += result;
         generatedTaskIds.push(...taskRows.map((task) => task.id));
       } catch (error) {
         try {
-          db.exec("ROLLBACK");
+          await db.exec("ROLLBACK");
         } catch {}
         throw error;
       }
@@ -5898,21 +5866,21 @@ async function generateSubjectTasks(projectId, assignment, onProgress) {
       assignedCount = createdCount;
     }
 
-    syncProjectTeams(projectId, assignment.teamIds, nowIso());
-    updateSubjectTaskStatusStmt.run({
+    await syncProjectTeams(projectId, assignment.teamIds, nowIso());
+    await updateSubjectTaskStatusStmt.run({
       id: projectId,
       taskStatus: "scoring",
       updatedAt: nowIso(),
     });
     invalidateTaskSummaryCaches(projectId);
-    const updatedProject = selectProjectByIdStmt.get(projectId);
-    const taskStats = getProjectTaskStats(projectId);
+    const updatedProject = await selectProjectByIdStmt.get(projectId);
+    const taskStats = await getProjectTaskStats(projectId);
     const taskCount = taskStats.total;
     const unassignedCount = taskStats.pending;
     onProgress?.({ stage: "任务生成完成", progress: 100 });
 
     return {
-      project: projectDto(updatedProject, taskStats),
+      project: await projectDto(updatedProject, taskStats),
       taskCount,
       createdCount,
       assignedCount,
@@ -5920,17 +5888,17 @@ async function generateSubjectTasks(projectId, assignment, onProgress) {
       taskVersion,
     };
   } catch (error) {
-    rollbackGeneratedTasks(projectId, generatedTaskIds, previousTaskStatus, assignedTaskIds);
+    await rollbackGeneratedTasks(projectId, generatedTaskIds, previousTaskStatus, assignedTaskIds);
     throw error;
   }
 }
 
-function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
-  const project = getProjectOrThrow(subjectId);
+async function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
+  const project = await getProjectOrThrow(subjectId);
   if (!["task_pending", "scoring"].includes(project.taskStatus)) {
     throw httpError(409, "当前项目已完成任务，不能继续下发");
   }
-  const assignment = parseTaskGenerationAssignees(assigneesInput);
+  const assignment = await parseTaskGenerationAssignees(assigneesInput);
 
   const activeJobId = activeTaskGenerationBySubject.get(subjectId);
   if (activeJobId) {
@@ -6071,7 +6039,7 @@ function buildImageFilter(query) {
   };
 }
 
-function listImages(query) {
+async function listImages(query) {
   const page = Math.max(Number(query.page) || 1, 1);
   const pageSize = Math.min(Math.max(Number(query.pageSize) || 20, 1), 100);
   const { where, params } = buildImageFilter(query);
@@ -6082,28 +6050,28 @@ function listImages(query) {
     String(query.includeDetails ?? "").toLowerCase(),
   );
   const total = includeTotal
-    ? db.prepare(`SELECT COUNT(*) AS total FROM images${where}`).get(...params).total
+    ? (await db.prepare(`SELECT COUNT(*) AS total FROM images${where}`).get(...params)).total
     : null;
   const selectColumns = includeDetails ? imageSelectColumns : imageListSelectColumns;
   const toDto = includeDetails ? imageDto : imageListDto;
-  const items = db
+  const items = (await db
     .prepare(
       `SELECT ${selectColumns} FROM images${where} ORDER BY createdAt DESC LIMIT ? OFFSET ?`,
     )
-    .all(...params, pageSize, (page - 1) * pageSize)
+    .all(...params, pageSize, (page - 1) * pageSize))
     .map(toDto);
 
   return { total, page, pageSize, items };
 }
 
-function getCategories(subjectId) {
+async function getCategories(subjectId) {
   const rows = subjectId
-    ? db
+    ? await db
         .prepare(
           "SELECT DISTINCT category FROM images WHERE subjectId = ? ORDER BY category COLLATE NOCASE",
         )
         .all(String(subjectId))
-    : db
+    : await db
         .prepare(
           "SELECT DISTINCT category FROM images ORDER BY category COLLATE NOCASE",
         )
@@ -6111,17 +6079,17 @@ function getCategories(subjectId) {
   return rows.map((row) => row.category);
 }
 
-function getScorers(subjectId) {
+async function getScorers(subjectId) {
   const where = subjectId
     ? "subjectId = ? AND scorer IS NOT NULL AND scorer <> '' AND overall IS NOT NULL"
     : "scorer IS NOT NULL AND scorer <> '' AND overall IS NOT NULL";
   const rows = subjectId
-    ? db
+    ? await db
         .prepare(
           `SELECT DISTINCT scorer FROM images WHERE ${where} ORDER BY scorer COLLATE NOCASE`,
         )
         .all(String(subjectId))
-    : db
+    : await db
         .prepare(
           `SELECT DISTINCT scorer FROM images WHERE ${where} ORDER BY scorer COLLATE NOCASE`,
         )
@@ -6141,8 +6109,8 @@ app.use(
 
 app.post("/api/auth/login", async (req, res, next) => {
   try {
-    const user = loginUser(req.body);
-    const session = createSession(user);
+    const user = await loginUser(req.body);
+    const session = await createSession(user);
     setSessionCookie(res, session.token, session.expiresAt);
     res.json({ user });
   } catch (error) {
@@ -6156,11 +6124,11 @@ app.get("/api/auth/session", (req, res) => {
   res.json({ user: req.auth });
 });
 
-app.post("/api/auth/logout", (req, res) => {
+app.post("/api/auth/logout", async (req, res) => {
   const token = cookieValue(req.headers.cookie, "image_rating_session");
   if (token) {
     const tokenHash = sessionTokenHash(token);
-    deleteSessionStmt.run(tokenHash);
+    await deleteSessionStmt.run(tokenHash);
     sessionSeenWriteAt.delete(tokenHash);
   }
   clearSessionCookie(res);
@@ -6175,7 +6143,7 @@ app.use("/api/tasks/assigned", requireScorer);
 
 app.get("/api/admin/dashboard", async (req, res, next) => {
   try {
-    res.json(listAdminDashboard(req.query));
+    res.json(await listAdminDashboard(req.query));
   } catch (error) {
     next(error);
   }
@@ -6183,7 +6151,7 @@ app.get("/api/admin/dashboard", async (req, res, next) => {
 
 app.get("/api/admin/dashboard/stats", async (req, res, next) => {
   try {
-    res.json(getDashboardStats());
+    res.json(await getDashboardStats());
   } catch (error) {
     next(error);
   }
@@ -6191,7 +6159,7 @@ app.get("/api/admin/dashboard/stats", async (req, res, next) => {
 
 app.get("/api/admin/dashboard/project-summary", async (req, res, next) => {
   try {
-    res.json(getDashboardProjectSection(req.query));
+    res.json(await getDashboardProjectSection(req.query));
   } catch (error) {
     next(error);
   }
@@ -6199,7 +6167,7 @@ app.get("/api/admin/dashboard/project-summary", async (req, res, next) => {
 
 app.get("/api/admin/dashboard/charts", async (req, res, next) => {
   try {
-    res.json(getDashboardCharts());
+    res.json(await getDashboardCharts());
   } catch (error) {
     next(error);
   }
@@ -6207,7 +6175,7 @@ app.get("/api/admin/dashboard/charts", async (req, res, next) => {
 
 app.get("/api/admin/dashboard/average-duration", async (req, res, next) => {
   try {
-    res.json(getDashboardAverageDuration());
+    res.json(await getDashboardAverageDuration());
   } catch (error) {
     next(error);
   }
@@ -6215,7 +6183,7 @@ app.get("/api/admin/dashboard/average-duration", async (req, res, next) => {
 
 app.get("/api/admin/dashboard/workload", async (req, res, next) => {
   try {
-    res.json(getDashboardWorkloadSection(req.query));
+    res.json(await getDashboardWorkloadSection(req.query));
   } catch (error) {
     next(error);
   }
@@ -6247,7 +6215,7 @@ app.get("/api/admin/scorers/completed/export", async (req, res, next) => {
 
 app.get("/api/admin/teams/task-summary/export", async (req, res, next) => {
   try {
-    exportTeamTaskSummary(req, res);
+    await exportTeamTaskSummary(req, res);
   } catch (error) {
     next(error);
   }
@@ -6255,7 +6223,7 @@ app.get("/api/admin/teams/task-summary/export", async (req, res, next) => {
 
 app.get("/api/admin/scoring/summary", async (req, res, next) => {
   try {
-    res.json(listScoringSummary(req.query));
+    res.json(await listScoringSummary(req.query));
   } catch (error) {
     next(error);
   }
@@ -6263,7 +6231,7 @@ app.get("/api/admin/scoring/summary", async (req, res, next) => {
 
 app.get("/api/admin/scoring/tasks", async (req, res, next) => {
   try {
-    res.json(listScoringTaskRecords(req.query));
+    res.json(await listScoringTaskRecords(req.query));
   } catch (error) {
     next(error);
   }
@@ -6271,7 +6239,7 @@ app.get("/api/admin/scoring/tasks", async (req, res, next) => {
 
 app.post("/api/admin/scoring/rollback/preview", async (req, res, next) => {
   try {
-    res.json(previewRollback(req.body));
+    res.json(await previewRollback(req.body));
   } catch (error) {
     next(error);
   }
@@ -6297,7 +6265,7 @@ app.get("/api/admin/scoring/rollback/:jobId", async (req, res, next) => {
 
 app.get("/api/users/scorers", async (req, res, next) => {
   try {
-    res.json(listScorerUsers(req.query));
+    res.json(await listScorerUsers(req.query));
   } catch (error) {
     next(error);
   }
@@ -6305,7 +6273,7 @@ app.get("/api/users/scorers", async (req, res, next) => {
 
 app.post("/api/users/scorers", async (req, res, next) => {
   try {
-    res.status(201).json({ user: createScorerUser(req.body) });
+    res.status(201).json({ user: await createScorerUser(req.body) });
   } catch (error) {
     next(error);
   }
@@ -6313,7 +6281,7 @@ app.post("/api/users/scorers", async (req, res, next) => {
 
 app.post("/api/users/scorers/batch", async (req, res, next) => {
   try {
-    res.status(201).json(createScorerUsers(req.body));
+    res.status(201).json(await createScorerUsers(req.body));
   } catch (error) {
     next(error);
   }
@@ -6321,7 +6289,7 @@ app.post("/api/users/scorers/batch", async (req, res, next) => {
 
 app.patch("/api/users/scorers/:id", async (req, res, next) => {
   try {
-    res.json({ user: updateScorerUser(req.params.id, req.body) });
+    res.json({ user: await updateScorerUser(req.params.id, req.body) });
   } catch (error) {
     next(error);
   }
@@ -6329,7 +6297,7 @@ app.patch("/api/users/scorers/:id", async (req, res, next) => {
 
 app.get("/api/teams", requireAdmin, async (req, res, next) => {
   try {
-    res.json(listTeams(req.query));
+    res.json(await listTeams(req.query));
   } catch (error) {
     next(error);
   }
@@ -6337,7 +6305,7 @@ app.get("/api/teams", requireAdmin, async (req, res, next) => {
 
 app.post("/api/teams", requireAdmin, async (req, res, next) => {
   try {
-    res.status(201).json({ team: createTeam(req.body) });
+    res.status(201).json({ team: await createTeam(req.body) });
   } catch (error) {
     next(error);
   }
@@ -6349,12 +6317,12 @@ app.get("/api/teams/scorers", requireAdmin, async (req, res, next) => {
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean);
-    const teamIds = normalizeTeamIds(rawTeamIds, {
+    const teamIds = await normalizeTeamIds(rawTeamIds, {
       required: true,
       enabledOnly: true,
     });
     const teamMatchMode = normalizeTeamMatchMode(req.query.teamMatchMode);
-    res.json({ users: listScorersByTeamIds(teamIds, teamMatchMode) });
+    res.json({ users: await listScorersByTeamIds(teamIds, teamMatchMode) });
   } catch (error) {
     next(error);
   }
@@ -6362,7 +6330,7 @@ app.get("/api/teams/scorers", requireAdmin, async (req, res, next) => {
 
 app.patch("/api/teams/:id", requireAdmin, async (req, res, next) => {
   try {
-    res.json({ team: updateTeam(req.params.id, req.body) });
+    res.json({ team: await updateTeam(req.params.id, req.body) });
   } catch (error) {
     next(error);
   }
@@ -6370,7 +6338,7 @@ app.patch("/api/teams/:id", requireAdmin, async (req, res, next) => {
 
 app.delete("/api/teams/:id", requireAdmin, async (req, res, next) => {
   try {
-    res.json(deleteTeam(req.params.id));
+    res.json(await deleteTeam(req.params.id));
   } catch (error) {
     next(error);
   }
@@ -6378,7 +6346,7 @@ app.delete("/api/teams/:id", requireAdmin, async (req, res, next) => {
 
 app.delete("/api/users/scorers/:id", async (req, res, next) => {
   try {
-    res.json(deleteScorerUser(req.params.id));
+    res.json(await deleteScorerUser(req.params.id));
   } catch (error) {
     next(error);
   }
@@ -6446,7 +6414,7 @@ app.post(
 app.put("/api/feedbacks/:id/reply", requireAdmin, async (req, res, next) => {
   try {
     res.json({
-      feedback: addFeedbackMessage(req.params.id, req.body, req.auth),
+      feedback: await addFeedbackMessage(req.params.id, req.body, req.auth),
     });
   } catch (error) {
     next(error);
@@ -6459,7 +6427,7 @@ app.post(
   async (req, res, next) => {
     try {
       res.json({
-        feedback: addFeedbackMessage(req.params.id, req.body, req.auth),
+        feedback: await addFeedbackMessage(req.params.id, req.body, req.auth),
       });
     } catch (error) {
       next(error);
@@ -6470,7 +6438,7 @@ app.post(
 app.put("/api/feedbacks/:id/status", async (req, res, next) => {
   try {
     res.json({
-      feedback: updateFeedbackStatus(req.params.id, req.body?.status, req.auth),
+      feedback: await updateFeedbackStatus(req.params.id, req.body?.status, req.auth),
     });
   } catch (error) {
     next(error);
@@ -6483,7 +6451,7 @@ app.post(
   async (req, res, next) => {
     try {
       res.json({
-        task: completeAssignedTask(req.params.id, {
+        task: await completeAssignedTask(req.params.id, {
           ...req.body,
           scorer: req.auth.username,
         }),
@@ -6500,7 +6468,7 @@ app.put(
   async (req, res, next) => {
     try {
       res.json({
-        task: updateCompletedTask(req.params.id, {
+        task: await updateCompletedTask(req.params.id, {
           ...req.body,
           scorer: req.auth.username,
         }),
@@ -6514,7 +6482,7 @@ app.put(
 app.get("/api/tasks/:id", requireScorer, async (req, res, next) => {
   try {
     res.json({
-      task: getTaskDetail(req.params.id, { scorer: req.auth.username }),
+      task: await getTaskDetail(req.params.id, { scorer: req.auth.username }),
     });
   } catch (error) {
     next(error);
@@ -6523,7 +6491,7 @@ app.get("/api/tasks/:id", requireScorer, async (req, res, next) => {
 
 app.get("/api/subjects", async (req, res, next) => {
   try {
-    res.json(listVisibleSubjects(req.auth).map(subjectDto));
+    res.json((await listVisibleSubjects(req.auth)).map(subjectDto));
   } catch (error) {
     next(error);
   }
@@ -6531,7 +6499,7 @@ app.get("/api/subjects", async (req, res, next) => {
 
 app.get("/api/projects", async (req, res, next) => {
   try {
-    res.json(listVisibleProjects(req.auth, req.query));
+    res.json(await listVisibleProjects(req.auth, req.query));
   } catch (error) {
     next(error);
   }
@@ -6539,9 +6507,9 @@ app.get("/api/projects", async (req, res, next) => {
 
 app.get("/api/projects/:id", async (req, res, next) => {
   try {
-    const project = getProjectOrThrow(req.params.id);
+    const project = await getProjectOrThrow(req.params.id);
     if (req.auth.role !== "admin") {
-      const allowed = db.prepare(
+      const allowed = await db.prepare(
         `SELECT 1 FROM rating_tasks
          WHERE projectId = ? AND scorer = ?
            AND status IN ('assigned', 'completed')
@@ -6549,7 +6517,7 @@ app.get("/api/projects/:id", async (req, res, next) => {
       ).get(project._id, req.auth.username);
       if (!allowed) throw httpError(403, "无权访问该项目");
     }
-    res.json({ project: projectDto(project) });
+    res.json({ project: await projectDto(project) });
   } catch (error) {
     next(error);
   }
@@ -6557,7 +6525,7 @@ app.get("/api/projects/:id", async (req, res, next) => {
 
 app.post("/api/projects", requireAdmin, async (req, res, next) => {
   try {
-    res.status(201).json({ project: createProject(req.body) });
+    res.status(201).json({ project: await createProject(req.body) });
   } catch (error) {
     next(error);
   }
@@ -6565,7 +6533,7 @@ app.post("/api/projects", requireAdmin, async (req, res, next) => {
 
 app.patch("/api/projects/:id", requireAdmin, async (req, res, next) => {
   try {
-    res.json({ project: updateProject(req.params.id, req.body) });
+    res.json({ project: await updateProject(req.params.id, req.body) });
   } catch (error) {
     next(error);
   }
@@ -6573,7 +6541,7 @@ app.patch("/api/projects/:id", requireAdmin, async (req, res, next) => {
 
 app.delete("/api/projects/:id", requireAdmin, async (req, res, next) => {
   try {
-    res.json(deleteProject(req.params.id));
+    res.json(await deleteProject(req.params.id));
   } catch (error) {
     next(error);
   }
@@ -6584,8 +6552,8 @@ app.get("/api/categories", async (req, res, next) => {
     if (req.auth.role !== "admin" && !req.query.subjectId)
       throw httpError(400, "请选择项目");
     if (req.query.subjectId)
-      assertSubjectAccess(String(req.query.subjectId), req.auth);
-    res.json(getCategories(req.query.subjectId));
+      await assertSubjectAccess(String(req.query.subjectId), req.auth);
+    res.json(await getCategories(req.query.subjectId));
   } catch (error) {
     next(error);
   }
@@ -6596,8 +6564,8 @@ app.get("/api/scorers", async (req, res, next) => {
     if (req.auth.role !== "admin" && !req.query.subjectId)
       throw httpError(400, "请选择项目");
     if (req.query.subjectId)
-      assertSubjectAccess(String(req.query.subjectId), req.auth);
-    res.json(getScorers(req.query.subjectId));
+      await assertSubjectAccess(String(req.query.subjectId), req.auth);
+    res.json(await getScorers(req.query.subjectId));
   } catch (error) {
     next(error);
   }
@@ -6608,7 +6576,7 @@ app.get("/api/images", async (req, res, next) => {
     if (req.auth.role !== "admin" && !req.query.subjectId)
       throw httpError(400, "请选择项目");
     if (req.query.subjectId)
-      assertSubjectAccess(String(req.query.subjectId), req.auth);
+      await assertSubjectAccess(String(req.query.subjectId), req.auth);
     setShortApiCache(res);
     res.json(await getQueryWorkerPool().run("images", req.query));
   } catch (error) {
@@ -6621,7 +6589,7 @@ app.get(
   requireAdmin,
   async (req, res, next) => {
     try {
-      res.json(getTaskReassignmentOptions(req.params.id));
+      res.json(await getTaskReassignmentOptions(req.params.id));
     } catch (error) {
       next(error);
     }
@@ -6633,7 +6601,7 @@ app.post(
   requireAdmin,
   async (req, res, next) => {
     try {
-      res.json(reassignSubjectTasks(req.params.id, req.body));
+      res.json(await reassignSubjectTasks(req.params.id, req.body));
     } catch (error) {
       next(error);
     }
@@ -6645,7 +6613,7 @@ app.get(
   requireAdmin,
   async (req, res, next) => {
     try {
-      res.json(getSubjectTaskReportSummary(req.params.id));
+      res.json(await getSubjectTaskReportSummary(req.params.id));
     } catch (error) {
       next(error);
     }
@@ -6669,8 +6637,8 @@ app.get(
   requireAdmin,
   async (req, res, next) => {
     try {
-      getProjectOrThrow(req.params.id);
-      res.json(listSubjectTaskOptions(req.params.id));
+      await getProjectOrThrow(req.params.id);
+      res.json(await listSubjectTaskOptions(req.params.id));
     } catch (error) {
       next(error);
     }
@@ -6679,12 +6647,12 @@ app.get(
 
 app.get("/api/projects/:id/tasks", requireAdmin, async (req, res, next) => {
   try {
-    const project = getProjectOrThrow(req.params.id);
-    const projectView = projectDto(project);
+    const project = await getProjectOrThrow(req.params.id);
+    const projectView = await projectDto(project);
     res.json({
-      subject: projectSubjectDto(project, projectView),
+      subject: await projectSubjectDto(project, projectView),
       project: projectView,
-      ...listSubjectTasks(req.params.id, req.query),
+      ...(await listSubjectTasks(req.params.id, req.query)),
     });
   } catch (error) {
     next(error);
@@ -6693,8 +6661,8 @@ app.get("/api/projects/:id/tasks", requireAdmin, async (req, res, next) => {
 
 app.get("/api/projects/:id/tasks/options", requireAdmin, async (req, res, next) => {
   try {
-    getProjectOrThrow(req.params.id);
-    res.json(listSubjectTaskOptions(req.params.id));
+    await getProjectOrThrow(req.params.id);
+    res.json(await listSubjectTaskOptions(req.params.id));
   } catch (error) {
     next(error);
   }
@@ -6702,7 +6670,7 @@ app.get("/api/projects/:id/tasks/options", requireAdmin, async (req, res, next) 
 
 app.get("/api/projects/:id/tasks/reassignment-options", requireAdmin, async (req, res, next) => {
   try {
-    res.json(getTaskReassignmentOptions(req.params.id));
+    res.json(await getTaskReassignmentOptions(req.params.id));
   } catch (error) {
     next(error);
   }
@@ -6714,7 +6682,7 @@ app.post(
   taskAllocationUpload.single("file"),
   async (req, res, next) => {
     try {
-      getProjectOrThrow(req.params.id);
+      await getProjectOrThrow(req.params.id);
       res.json(await parseTaskAllocationWorkbook(req.file));
     } catch (error) {
       next(error);
@@ -6724,7 +6692,7 @@ app.post(
 
 app.post("/api/projects/:id/tasks/reassign", requireAdmin, async (req, res, next) => {
   try {
-    res.json(reassignSubjectTasks(req.params.id, req.body));
+    res.json(await reassignSubjectTasks(req.params.id, req.body));
   } catch (error) {
     next(error);
   }
@@ -6732,7 +6700,7 @@ app.post("/api/projects/:id/tasks/reassign", requireAdmin, async (req, res, next
 
 app.get("/api/projects/:id/tasks/report", requireAdmin, async (req, res, next) => {
   try {
-    res.json(getSubjectTaskReportSummary(req.params.id));
+    res.json(await getSubjectTaskReportSummary(req.params.id));
   } catch (error) {
     next(error);
   }
@@ -6749,7 +6717,7 @@ app.get("/api/projects/:id/tasks/report/export", requireAdmin, async (req, res, 
 app.post("/api/projects/:id/tasks/generate", requireAdmin, async (req, res, next) => {
   try {
     res.status(202).json(taskGenerationJobDto(
-      startSubjectTaskGeneration(req.params.id, req.body),
+      await startSubjectTaskGeneration(req.params.id, req.body),
     ));
   } catch (error) {
     next(error);
@@ -6768,7 +6736,7 @@ app.get("/api/projects/:id/tasks/generate/:jobId", requireAdmin, async (req, res
 
 app.get("/api/projects/:id/tasks/:taskId", requireAdmin, async (req, res, next) => {
   try {
-    res.json({ task: getTaskDetail(req.params.taskId, { projectId: req.params.id }) });
+    res.json({ task: await getTaskDetail(req.params.taskId, { projectId: req.params.id }) });
   } catch (error) {
     next(error);
   }
@@ -6780,7 +6748,7 @@ app.get(
   async (req, res, next) => {
     try {
       res.json({
-        task: getTaskDetail(req.params.taskId, { projectId: req.params.id }),
+        task: await getTaskDetail(req.params.taskId, { projectId: req.params.id }),
       });
     } catch (error) {
       next(error);
@@ -6790,12 +6758,12 @@ app.get(
 
 app.get("/api/subjects/:id/tasks", requireAdmin, async (req, res, next) => {
   try {
-    const project = getProjectOrThrow(req.params.id);
-    const projectView = projectDto(project);
+    const project = await getProjectOrThrow(req.params.id);
+    const projectView = await projectDto(project);
     res.json({
-      subject: projectSubjectDto(project, projectView),
+      subject: await projectSubjectDto(project, projectView),
       project: projectView,
-      ...listSubjectTasks(req.params.id, req.query),
+      ...(await listSubjectTasks(req.params.id, req.query)),
     });
   } catch (error) {
     next(error);
@@ -6958,7 +6926,7 @@ app.patch(
             createdAt: nowIso(),
             expiresAt: importJobExpiry(),
           };
-          insertImportJobStmt.run({
+          await insertImportJobStmt.run({
             uploadId: job.uploadId,
             originalFilename: job.originalFilename,
             totalChunks: job.totalChunks,
@@ -6979,7 +6947,7 @@ app.patch(
             expiresAt: job.expiresAt,
           });
           importJobs.set(uploadId, job);
-          setImmediate(() => void runResumableImportJob(job));
+          setImmediate(async () => void (await runResumableImportJob(job)));
         } else {
           await saveResumableUploadSession(updatedSession);
         }
@@ -7000,7 +6968,7 @@ app.get("/api/import/uploads/:uploadId/status", async (req, res, next) => {
     const uploadId = req.params.uploadId;
     validateUploadId(uploadId);
     const job =
-      importJobs.get(uploadId) || importJobFromRow(selectImportJobStmt.get(uploadId));
+      importJobs.get(uploadId) || importJobFromRow(await selectImportJobStmt.get(uploadId));
     if (job) return res.json(importJobDto(job));
 
     const session = await loadResumableUploadSession(uploadId);
@@ -7025,13 +6993,13 @@ app.delete("/api/import/uploads/:uploadId", async (req, res, next) => {
     requireTusResumableHeader(req);
     const uploadId = req.params.uploadId;
     const job =
-      importJobs.get(uploadId) || importJobFromRow(selectImportJobStmt.get(uploadId));
+      importJobs.get(uploadId) || importJobFromRow(await selectImportJobStmt.get(uploadId));
     if (job && !["failed", "completed"].includes(job.status)) {
       throw httpError(409, "导入任务已开始，无法取消");
     }
 
     await cleanupResumableUploadSession(uploadId);
-    deleteImportJobStmt.run(uploadId);
+    await deleteImportJobStmt.run(uploadId);
     importJobs.delete(uploadId);
     res.status(204).end();
   } catch (error) {
@@ -7063,7 +7031,7 @@ app.post("/api/import/chunks/:uploadId/complete", async (req, res, next) => {
     if (existingJob) {
       return res.status(202).json(importJobDto(existingJob));
     }
-    const persistedJob = importJobFromRow(selectImportJobStmt.get(uploadId));
+    const persistedJob = importJobFromRow(await selectImportJobStmt.get(uploadId));
     if (persistedJob) {
       return res.status(202).json(importJobDto(persistedJob));
     }
@@ -7098,7 +7066,7 @@ app.post("/api/import/chunks/:uploadId/complete", async (req, res, next) => {
       createdAt: nowIso(),
       expiresAt: importJobExpiry(),
     };
-    insertImportJobStmt.run({
+    await insertImportJobStmt.run({
       uploadId: job.uploadId,
       originalFilename: job.originalFilename,
       totalChunks: job.totalChunks,
@@ -7116,19 +7084,19 @@ app.post("/api/import/chunks/:uploadId/complete", async (req, res, next) => {
       expiresAt: job.expiresAt,
     });
     importJobs.set(uploadId, job);
-    setImmediate(() => void runChunkedImportJob(job));
+    setImmediate(async () => void (await runChunkedImportJob(job)));
     res.status(202).json(importJobDto(job));
   } catch (error) {
     next(error);
   }
 });
 
-app.get("/api/import/chunks/:uploadId/status", (req, res, next) => {
+app.get("/api/import/chunks/:uploadId/status", async (req, res, next) => {
   try {
     validateUploadId(req.params.uploadId);
     const job =
       importJobs.get(req.params.uploadId) ||
-      importJobFromRow(selectImportJobStmt.get(req.params.uploadId));
+      importJobFromRow(await selectImportJobStmt.get(req.params.uploadId));
     if (!job) throw httpError(404, "上传任务不存在或已过期");
     res.json(importJobDto(job));
   } catch (error) {
@@ -7142,7 +7110,7 @@ app.delete("/api/import/chunks/:uploadId", async (req, res, next) => {
       recursive: true,
       force: true,
     });
-    deleteImportJobStmt.run(req.params.uploadId);
+    await deleteImportJobStmt.run(req.params.uploadId);
     res.status(204).end();
   } catch (error) {
     next(error);
@@ -7151,12 +7119,12 @@ app.delete("/api/import/chunks/:uploadId", async (req, res, next) => {
 
 app.delete("/api/subjects/:id", requireAdmin, async (req, res, next) => {
   try {
-    const subject = selectSubjectByIdStmt.get(req.params.id);
+    const subject = await selectSubjectByIdStmt.get(req.params.id);
     if (!subject) return res.status(404).json({ message: "项目不存在" });
-    assertPackageCanBeDeleted(subject._id);
+    await assertPackageCanBeDeleted(subject._id);
 
     const requestedAt = new Date().toISOString();
-    const result = markSubjectForDeletionStmt.run({
+    const result = await markSubjectForDeletionStmt.run({
       id: subject._id,
       deletionRequestedAt: requestedAt,
       updatedAt: requestedAt,
@@ -7178,15 +7146,11 @@ app.delete("/api/subjects/:id", requireAdmin, async (req, res, next) => {
 
 app.put("/api/images/:id/score", async (req, res, next) => {
   try {
-    const current = selectImageByIdStmt.get(req.params.id);
+    const current = await selectImageByIdStmt.get(req.params.id);
     if (!current) return res.status(404).json({ message: "图片不存在" });
     if (
       req.auth.role !== "admin" &&
-      !selectAssignedTaskForImageStmt.get(
-        req.auth.username,
-        current.storagePath,
-        current.storagePath,
-      )
+      !(await selectAssignedTaskForImageStmt.get(req.auth.username, current.storagePath, current.storagePath))
     ) {
       throw httpError(403, "无权为该图片评分");
     }
@@ -7195,7 +7159,7 @@ app.put("/api/images/:id/score", async (req, res, next) => {
       ...(req.body || {}),
       scorer: req.auth.role === "scorer" ? req.auth.username : current.scorer,
     });
-    updateImageScoreStmt.run({
+    await updateImageScoreStmt.run({
       id: req.params.id,
       ...score,
       scorer: score.scorer ?? current.scorer ?? null,
@@ -7203,7 +7167,7 @@ app.put("/api/images/:id/score", async (req, res, next) => {
     });
     queryWorkerPool?.invalidate(["images"]);
 
-    const updated = selectImageByIdStmt.get(req.params.id);
+    const updated = await selectImageByIdStmt.get(req.params.id);
     res.json(imageDto(updated));
   } catch (error) {
     next(error);
@@ -7231,16 +7195,16 @@ app.use((error, req, res, _next) => {
   res.status(status).json({ message, code: error.code || "REQUEST_FAILED" });
 });
 
-const queuedSubjects = db
+const queuedSubjects = await db
   .prepare("SELECT id FROM subjects WHERE deletionRequestedAt IS NOT NULL")
   .all();
 for (const subject of queuedSubjects) queueSubjectDeletion(subject.id);
 
 const startupNow = nowIso();
-deleteExpiredSessionsStmt.run(startupNow);
-deleteExpiredImportJobsStmt.run(startupNow);
+await deleteExpiredSessionsStmt.run(startupNow);
+await deleteExpiredImportJobsStmt.run(startupNow);
 await sweepResumableUploadSessions();
-db.prepare(
+await db.prepare(
   `UPDATE import_jobs
    SET status = 'failed',
        stage = '导入失败',

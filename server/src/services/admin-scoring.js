@@ -3,7 +3,6 @@ import crypto from "node:crypto";
 function placeholders(length) {
   return Array.from({ length }, () => "?").join(", ");
 }
-
 function chunk(items, size = 400) {
   const chunks = [];
   for (let index = 0; index < items.length; index += size) {
@@ -204,11 +203,11 @@ export function createAdminScoringService({
     return { where: `WHERE ${clauses.join(" AND ")}`, params };
   }
 
-  function calculateScoringSummary(query = {}) {
+  async function calculateScoringSummary(query = {}) {
     const { page, pageSize } = parseTaskPagination(query);
     const filter = buildTaskFilter(query);
     const totalScorerCount = Number(
-      db
+      (await db
         .prepare(
           `SELECT COUNT(*) AS total
            FROM (
@@ -218,9 +217,9 @@ export function createAdminScoringService({
              GROUP BY rating_tasks.scorer
            ) AS scorer_groups`,
         )
-        .get(...filter.params).total || 0,
+        .get(...filter.params)).total || 0,
     );
-    const totalsRow = db
+    const totalsRow = await db
       .prepare(
         `SELECT COUNT(*) AS totalTaskCount,
                 SUM(CASE WHEN rating_tasks.submissionMode = 'direct' THEN 1 ELSE 0 END) AS directSubmitCount,
@@ -230,7 +229,7 @@ export function createAdminScoringService({
          ${filter.where}`,
       )
       .get(...filter.params);
-    const rows = db
+    const rows = await db
       .prepare(
         `SELECT rating_tasks.scorer,
                 COUNT(*) AS totalTaskCount,
@@ -293,7 +292,7 @@ export function createAdminScoringService({
     };
   }
 
-  function listScoringSummary(query = {}) {
+  async function listScoringSummary(query = {}) {
     const key = JSON.stringify({
       page: query.page || 1,
       pageSize: query.pageSize || 10,
@@ -305,7 +304,7 @@ export function createAdminScoringService({
     });
     const cached = summaryCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
-    const value = calculateScoringSummary(query);
+    const value = await calculateScoringSummary(query);
     summaryCache.set(key, {
       value,
       expiresAt: Date.now() + summaryCacheTtlMs,
@@ -313,18 +312,18 @@ export function createAdminScoringService({
     return value;
   }
 
-  function listScoringTaskRecords(query = {}) {
+  async function listScoringTaskRecords(query = {}) {
     const { page, pageSize } = parseTaskPagination(query);
     const filter = buildTaskFilter(query);
     const cursor = parseTaskCursor(query.cursor, httpError);
     const total = includeTaskTotal(query)
       ? Number(
-        db
+        (await db
           .prepare(`SELECT COUNT(*) AS total FROM rating_tasks ${filter.where}`)
-          .get(...filter.params).total || 0,
+          .get(...filter.params)).total || 0,
       )
       : null;
-    const rows = db
+    const rows = await db
       .prepare(
         `SELECT rating_tasks.id, rating_tasks.subjectId, rating_tasks.projectId,
                 rating_tasks.taskType, rating_tasks.status, rating_tasks.scorer,
@@ -340,11 +339,11 @@ export function createAdminScoringService({
          LIMIT ?${cursor ? "" : " OFFSET ?"}`,
       )
       .all(
-        ...filter.params,
-        ...(cursor ? [cursor.completedAt, cursor.completedAt, cursor.id] : []),
-        pageSize + 1,
-        ...(cursor ? [] : [(page - 1) * pageSize]),
-      );
+      ...filter.params,
+      ...(cursor ? [cursor.completedAt, cursor.completedAt, cursor.id] : []),
+      pageSize + 1,
+      ...(cursor ? [] : [(page - 1) * pageSize])
+    );
     const hasMore = rows.length > pageSize;
     const pageRows = rows.slice(0, pageSize);
     const lastRow = pageRows[pageRows.length - 1];
@@ -361,11 +360,11 @@ export function createAdminScoringService({
     };
   }
 
-  function selectTasksByIds(taskIds) {
+  async function selectTasksByIds(taskIds) {
     const rows = [];
     for (const ids of chunk(taskIds)) {
       rows.push(
-        ...db
+        ...(await db
           .prepare(
             `SELECT rating_tasks.id, rating_tasks.subjectId, rating_tasks.projectId,
                     rating_tasks.taskVersion, rating_tasks.taskType, rating_tasks.status,
@@ -378,16 +377,16 @@ export function createAdminScoringService({
              LEFT JOIN projects ON projects.id = rating_tasks.projectId
              WHERE rating_tasks.id IN (${placeholders(ids.length)})`,
           )
-          .all(...ids),
+          .all(...ids)),
       );
     }
     const order = new Map(taskIds.map((id, index) => [id, index]));
     return rows.sort((left, right) => order.get(left.id) - order.get(right.id));
   }
 
-  function analyzeRollbackPayload(payload) {
+  async function analyzeRollbackPayload(payload) {
     const extracted = extractTaskIds(payload, httpError);
-    const rows = selectTasksByIds(extracted.taskIds);
+    const rows = await selectTasksByIds(extracted.taskIds);
     const rowById = new Map(rows.map((row) => [row.id, row]));
     const missingTaskIds = extracted.taskIds.filter((id) => !rowById.has(id));
     const matchedRows = extracted.taskIds
@@ -437,13 +436,13 @@ export function createAdminScoringService({
     };
   }
 
-  function previewRollback(payload = {}) {
-    return rollbackPreviewDto(analyzeRollbackPayload(payload));
+  async function previewRollback(payload = {}) {
+    return rollbackPreviewDto(await analyzeRollbackPayload(payload));
   }
 
-  function rollbackScoringTasks(payload = {}, admin = {}, onProgress) {
+  async function rollbackScoringTasks(payload = {}, admin = {}, onProgress) {
     onProgress?.({ stage: "正在校验回退任务", progress: 8 });
-    const analysis = analyzeRollbackPayload(payload);
+    const analysis = await analyzeRollbackPayload(payload);
     if (!analysis.rollbackRows.length) throw httpError(400, "没有可回退的已完成任务");
 
     const now = nowIso();
@@ -459,10 +458,10 @@ export function createAdminScoringService({
     let changed = 0;
 
     onProgress?.({ stage: "正在回退任务", progress: 20 });
-    db.exec("BEGIN IMMEDIATE");
+    await db.exec("BEGIN IMMEDIATE");
     try {
       for (const ids of chunk(taskIds)) {
-        changed += db
+        changed += (await db
           .prepare(
             `UPDATE rating_tasks
              SET status = 'assigned',
@@ -485,7 +484,7 @@ export function createAdminScoringService({
                AND status = 'completed'
                AND id IN (${placeholders(ids.length)})`,
           )
-          .run(now, adminName, now, taskVersion, ...ids).changes;
+          .run(now, adminName, now, taskVersion, ...ids)).changes;
       }
 
       onProgress?.({ stage: "正在更新项目状态", progress: 88 });
@@ -494,17 +493,17 @@ export function createAdminScoringService({
       }
 
       for (const ids of chunk(projectIds)) {
-        db.prepare(
+        await db.prepare(
           `UPDATE projects
            SET taskStatus = 'scoring', updatedAt = ?
            WHERE id IN (${placeholders(ids.length)})`,
         ).run(now, ...ids);
       }
 
-      db.exec("COMMIT");
+      await db.exec("COMMIT");
     } catch (error) {
       try {
-        db.exec("ROLLBACK");
+        await db.exec("ROLLBACK");
       } catch {}
       throw error;
     }
@@ -562,19 +561,15 @@ export function createAdminScoringService({
     rollbackJobs.set(job.jobId, job);
     activeRollbackJobsByKey.set(key, job.jobId);
 
-    setImmediate(() => {
+    setImmediate(async () => {
       job.status = "running";
       job.stage = "正在准备回退任务";
       job.progress = 3;
       try {
-        job.result = rollbackScoringTasks(
-          { taskIds: extracted.taskIds },
-          admin,
-          ({ stage, progress }) => {
-            job.stage = stage;
-            job.progress = Math.max(0, Math.min(99, progress));
-          },
-        );
+        job.result = await rollbackScoringTasks({ taskIds: extracted.taskIds }, admin, ({ stage, progress }) => {
+          job.stage = stage;
+          job.progress = Math.max(0, Math.min(99, progress));
+        });
         job.status = "completed";
         job.stage = "任务回退完成";
         job.progress = 100;

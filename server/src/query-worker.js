@@ -1,15 +1,12 @@
 import { parentPort, workerData } from "node:worker_threads";
-import { DatabaseSync } from "node:sqlite";
-
-const db = new DatabaseSync(workerData.databasePath, { readOnly: true });
-db.exec("PRAGMA query_only = ON; PRAGMA busy_timeout = 500; PRAGMA foreign_keys = ON;");
+import { db, scoreNumericFields, skippableScoreFields } from "./postgres.js";
 
 const taskVersion = workerData.taskVersion;
 const taskCriteria = workerData.taskCriteria;
-const scoreNumericFields = workerData.scoreNumericFields;
-const skippableScoreFields = workerData.skippableScoreFields;
-const scoreFilterKeys = new Set(scoreNumericFields);
-const scoreStateFields = skippableScoreFields.map((field) => `${field}State`);
+const configuredScoreNumericFields = workerData.scoreNumericFields;
+const configuredSkippableScoreFields = workerData.skippableScoreFields;
+const scoreFilterKeys = new Set(configuredScoreNumericFields.length ? configuredScoreNumericFields : scoreNumericFields);
+const scoreStateFields = (configuredSkippableScoreFields.length ? configuredSkippableScoreFields : skippableScoreFields).map((field) => `${field}State`);
 const imageSelectColumns = workerData.imageSelectColumns;
 const imageListSelectColumns =
   "id AS _id, subjectId, filename, storagePath, thumbnailPath, category, directory, isInfographic";
@@ -37,10 +34,10 @@ function parsePage(query, defaultSize = 10) {
   };
 }
 
-function parseProjectId(value) {
+async function parseProjectId(value) {
   const projectId = String(value ?? '').trim();
   if (!projectId) throw queryError(400, '请选择项目');
-  const project = db.prepare(`
+  const project = await db.prepare(`
     SELECT id, packageId
     FROM projects
     WHERE id = ? AND deletionRequestedAt IS NULL
@@ -49,18 +46,18 @@ function parseProjectId(value) {
   if (!project) {
     throw queryError(404, '项目不存在');
   }
-  const packageIds = db
+  const packageIds = (await db
     .prepare('SELECT packageId FROM project_packages WHERE projectId = ?')
-    .all(projectId)
+    .all(projectId))
     .map((row) => row.packageId);
   if (!packageIds.length) packageIds.push(project.packageId);
-  const importedPackageCount = db.prepare(`
+  const importedPackageCount = (await db.prepare(`
     SELECT COUNT(*) AS count
     FROM subjects
     WHERE id IN (${placeholders(packageIds.length)})
       AND deletionRequestedAt IS NULL
       AND status = 'imported'
-  `).get(...packageIds).count;
+  `).get(...packageIds)).count;
   if (importedPackageCount !== packageIds.length) {
     throw queryError(409, '关联图包尚未处理完成');
   }
@@ -123,29 +120,29 @@ function feedbackDto(row, messages) {
   };
 }
 
-function listFeedbacks(query) {
+async function listFeedbacks(query) {
   const { page, pageSize } = parsePage(query);
   const statuses = new Set(["pending", "processing", "resolved"]);
   const status = query.status ? String(query.status) : null;
   if (status && !statuses.has(status)) throw queryError(400, "处理状态不正确");
   const where = status ? " WHERE status = ?" : "";
   const params = status ? [status] : [];
-  const total = db
+  const total = (await db
     .prepare(`SELECT COUNT(*) AS total FROM feedbacks${where}`)
-    .get(...params).total;
-  const rows = db
+    .get(...params)).total;
+  const rows = await db
     .prepare(
       `SELECT * FROM feedbacks${where} ORDER BY submittedAt DESC, id DESC LIMIT ? OFFSET ?`,
     )
     .all(...params, pageSize, (page - 1) * pageSize);
   const messagesByFeedbackId = new Map();
   if (rows.length) {
-    db.prepare(`
+    (await db.prepare(`
       SELECT id, feedbackId, author, authorRole, content, createdAt
       FROM feedback_messages
       WHERE feedbackId IN (${placeholders(rows.length)})
       ORDER BY feedbackId ASC, createdAt ASC, id ASC
-    `).all(...rows.map((row) => row.id)).forEach((message) => {
+    `).all(...rows.map((row) => row.id))).forEach((message) => {
       const messages = messagesByFeedbackId.get(message.feedbackId) || [];
       messages.push(message);
       messagesByFeedbackId.set(message.feedbackId, messages);
@@ -223,16 +220,16 @@ function scoreFromRow(row) {
   return score;
 }
 
-function listImages(query) {
+async function listImages(query) {
   const { page, pageSize } = parsePage(query, 20);
   const { where, params } = buildImageFilter(query);
   const includeTotal = enabled(query.includeTotal);
   const includeDetails = enabled(query.includeDetails);
   const total = includeTotal
-    ? db.prepare(`SELECT COUNT(*) AS total FROM images${where}`).get(...params).total
+    ? (await db.prepare(`SELECT COUNT(*) AS total FROM images${where}`).get(...params)).total
     : null;
   const columns = includeDetails ? imageSelectColumns : imageListSelectColumns;
-  const rows = db
+  const rows = await db
     .prepare(`SELECT ${columns} FROM images${where} ORDER BY createdAt DESC LIMIT ? OFFSET ?`)
     .all(...params, pageSize, (page - 1) * pageSize);
   return {
@@ -290,10 +287,10 @@ function criterionOrderSql(column) {
   return `CASE ${cases} ELSE ${taskCriteria.length} END`;
 }
 
-function hydrateTaskListRows(rows) {
+async function hydrateTaskListRows(rows) {
   if (!rows.length) return rows.map((row) => ({ ...row, items: [] }));
   const taskIds = rows.map((row) => row.id);
-  const itemRows = db.prepare(`
+  const itemRows = await db.prepare(`
     SELECT taskId, imageId, position
     FROM rating_task_items
     WHERE taskId IN (${placeholders(taskIds.length)})
@@ -301,7 +298,7 @@ function hydrateTaskListRows(rows) {
   `).all(...taskIds);
   const imageIds = [...new Set(itemRows.map((item) => item.imageId))];
   const images = imageIds.length
-    ? db.prepare(`SELECT ${taskListImageSelectColumns} FROM images WHERE id IN (${placeholders(imageIds.length)})`).all(...imageIds)
+    ? await db.prepare(`SELECT ${taskListImageSelectColumns} FROM images WHERE id IN (${placeholders(imageIds.length)})`).all(...imageIds)
     : [];
   const imageById = new Map(images.map((row) => [row._id, {
     _id: row._id,
@@ -320,10 +317,10 @@ function hydrateTaskListRows(rows) {
   return rows.map((row) => ({ ...row, items: itemsByTaskId.get(row.id) || [] }));
 }
 
-function listAssignedTasks(query) {
+async function listAssignedTasks(query) {
   const scorer = String(query.scorer || "").trim();
   if (!scorer) throw queryError(400, "缺少打分人");
-  const user = db.prepare("SELECT 1 FROM users WHERE username = ? AND role = 'scorer' LIMIT 1").get(scorer);
+  const user = await db.prepare("SELECT 1 FROM users WHERE username = ? AND role = 'scorer' LIMIT 1").get(scorer);
   if (!user) throw queryError(404, "打分账号不存在");
   const { page, pageSize } = parsePage(query);
   const clauses = ["rating_tasks.taskVersion = ?", "rating_tasks.scorer = ?"];
@@ -337,7 +334,7 @@ function listAssignedTasks(query) {
   }
   if (query.projectId) {
     clauses.push("rating_tasks.projectId = ?");
-    params.push(parseProjectId(query.projectId));
+    params.push(await parseProjectId(query.projectId));
   }
   const criterion = String(query.criterion || "");
   if (taskCriteria.includes(criterion)) {
@@ -358,9 +355,9 @@ function listAssignedTasks(query) {
     ? ` AND ((${orderSql}) > ? OR ((${orderSql}) = ? AND (rating_tasks.createdAt > ? OR (rating_tasks.createdAt = ? AND rating_tasks.id > ?))))`
     : "";
   const total = enabled(query.includeTotal)
-    ? db.prepare(`SELECT COUNT(*) AS total FROM rating_tasks ${where}`).get(...params).total
+    ? (await db.prepare(`SELECT COUNT(*) AS total FROM rating_tasks ${where}`).get(...params)).total
     : null;
-  const rows = db.prepare(`
+  const rows = await db.prepare(`
     SELECT rating_tasks.id, rating_tasks.subjectId, rating_tasks.projectId,
            rating_tasks.taskType, rating_tasks.status, rating_tasks.createdAt,
            ${orderSql} AS criterionOrder, projects.name AS subjectName
@@ -369,19 +366,14 @@ function listAssignedTasks(query) {
     ${where}${cursorWhere}
     ORDER BY ${orderSql} ASC, rating_tasks.createdAt ASC, rating_tasks.id ASC
     LIMIT ?${useCursor ? "" : " OFFSET ?"}
-  `).all(
-    ...params,
-    ...(useCursor
-      ? [cursor.criterionOrder, cursor.criterionOrder, cursor.createdAt, cursor.createdAt, cursor.id]
-      : []),
-    pageSize + 1,
-    ...(useCursor ? [] : [(page - 1) * pageSize]),
-  );
+  `).all(...params, ...(useCursor
+    ? [cursor.criterionOrder, cursor.criterionOrder, cursor.createdAt, cursor.createdAt, cursor.id]
+    : []), pageSize + 1, ...(useCursor ? [] : [(page - 1) * pageSize]));
   const hasMore = rows.length > pageSize;
   const pageRows = rows.slice(0, pageSize);
   const hydrated = enabled(query.summaryOnly)
     ? pageRows.map((row) => ({ ...row, items: [] }))
-    : hydrateTaskListRows(pageRows);
+    : await hydrateTaskListRows(pageRows);
   const lastRow = pageRows.at(-1);
   return {
     total,
@@ -408,12 +400,12 @@ function listAssignedTasks(query) {
   };
 }
 
-function assignedTaskOptions(query) {
+async function assignedTaskOptions(query) {
   const scorer = String(query.scorer || "").trim();
   if (!scorer) throw queryError(400, "缺少打分人");
-  const user = db.prepare("SELECT 1 FROM users WHERE username = ? AND role = 'scorer' LIMIT 1").get(scorer);
+  const user = await db.prepare("SELECT 1 FROM users WHERE username = ? AND role = 'scorer' LIMIT 1").get(scorer);
   if (!user) throw queryError(404, "打分账号不存在");
-  const rows = db.prepare(`
+  const rows = await db.prepare(`
     SELECT projects.id AS _id, projects.name, projects.createdAt
     FROM scorer_task_stats
     JOIN projects ON projects.id = scorer_task_stats.projectId
@@ -427,20 +419,20 @@ function assignedTaskOptions(query) {
   return { projects: rows.map(({ _id, name }) => ({ _id, name })) };
 }
 
-function scorerDashboard(query) {
+async function scorerDashboard(query) {
   const scorer = String(query.scorer || "").trim();
   if (!scorer) throw queryError(400, "缺少打分人");
-  const user = db.prepare("SELECT 1 FROM users WHERE username = ? AND role = 'scorer' LIMIT 1").get(scorer);
+  const user = await db.prepare("SELECT 1 FROM users WHERE username = ? AND role = 'scorer' LIMIT 1").get(scorer);
   if (!user) throw queryError(404, "打分账号不存在");
-  const projectId = query.projectId ? parseProjectId(query.projectId) : null;
+  const projectId = query.projectId ? await parseProjectId(query.projectId) : null;
   const stats = projectId
-    ? db.prepare(`
+    ? await db.prepare(`
         SELECT assigned AS pendingTasks,
                completed AS completedTasks
         FROM scorer_task_stats
         WHERE taskVersion = ? AND scorer = ? AND projectId = ?
       `).get(taskVersion, scorer, projectId)
-    : db.prepare(`
+    : await db.prepare(`
         SELECT COALESCE(SUM(assigned), 0) AS pendingTasks,
                COALESCE(SUM(completed), 0) AS completedTasks
         FROM scorer_task_stats
@@ -449,14 +441,14 @@ function scorerDashboard(query) {
   const pendingTasks = Number(stats?.pendingTasks || 0);
   const completedTasks = Number(stats?.completedTasks || 0);
   const totalTasks = pendingTasks + completedTasks;
-  const projectCount = Number(db.prepare(`
+  const projectCount = Number((await db.prepare(`
     SELECT COUNT(*) AS total
     FROM scorer_task_stats
     WHERE taskVersion = ?
       AND scorer = ?
       AND projectId <> ''
       AND (assigned + completed) > 0
-  `).get(taskVersion, scorer).total || 0);
+  `).get(taskVersion, scorer)).total || 0);
   return {
     pendingTasks,
     completedTasks,
@@ -474,11 +466,11 @@ const operations = {
   scorerDashboard,
 };
 
-parentPort.on("message", ({ requestId, operation, query }) => {
+parentPort.on("message", async ({ requestId, operation, query }) => {
   try {
     const handler = operations[operation];
     if (!handler) throw queryError(400, "不支持的查询操作");
-    parentPort.postMessage({ requestId, ok: true, data: handler(query || {}) });
+    parentPort.postMessage({ requestId, ok: true, data: await handler(query || {}) });
   } catch (error) {
     parentPort.postMessage({
       requestId,

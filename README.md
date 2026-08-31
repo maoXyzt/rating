@@ -8,7 +8,8 @@ cp -n .env.example .env
 docker compose up --build -d
 ```
 
-打开 `http://localhost:8080`。数据库迁移基础设施已加入 Compose；应用运行时切换需在完成 PostgreSQL DAO 改造后启用。
+打开 `http://localhost:8080`。应用运行时使用 Compose 中的 `postgres:18-trixie`。
+已有 SQLite 数据时，请先按 [DEPLOY.md](DEPLOY.md) 第 8 节完成迁移，再启动 API。
 
 ## 使用流程
 
@@ -17,7 +18,7 @@ docker compose up --build -d
 3. 打分账号登录后，在“任务列表”领取分配给自己的五图排序任务并提交。
 4. 已完成任务保存打分人、完成时间、用时、排序结果、并列关系和不适用图片；修改任务不会覆盖初次完成时间和用时。
 
-数据库目标为 Docker Compose 中的 `postgres:18-trixie`，数据持久化在 `postgres_data` volume。迁移工具可读取旧的 `server/data/image-rating.sqlite` 文件。
+数据库目标为 Docker Compose 中的 `postgres:18-trixie`，数据持久化在 `${RATING_DATA_DIR}/postgres`。上传图片保存在 `${RATING_DATA_DIR}/uploads`。
 
 ZIP 内目录示例：
 
