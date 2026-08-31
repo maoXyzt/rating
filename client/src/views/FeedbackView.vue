@@ -6,6 +6,7 @@ import { imageApi } from '../services/images';
 import { isQueryUnavailable } from '../services/http';
 import AsyncStatePlaceholder from '../components/AsyncStatePlaceholder.vue';
 import type { FeedbackItem, FeedbackStatus, FeedbackType } from '../types/image';
+import { formatDateTime } from '../utils/time';
 
 const message = useMessage();
 const loading = ref(false);
@@ -61,7 +62,7 @@ function typeLabel(value: FeedbackType) {
 }
 
 function formatDate(value: string | null) {
-  return value ? new Date(value).toLocaleString() : '-';
+  return formatDateTime(value);
 }
 
 function canManageFeedback(feedback: FeedbackItem | null) {

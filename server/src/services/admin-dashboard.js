@@ -383,14 +383,14 @@ export function createAdminDashboardService({
   async function listDashboardPeakHours(projectId = null) {
     const rows = await db
       .prepare(
-        `SELECT CAST(strftime('%H', completedAt) AS INTEGER) AS hour,
+        `SELECT EXTRACT(HOUR FROM completedAt AT TIME ZONE 'Asia/Shanghai')::integer AS hour,
                 COUNT(*) AS count
          FROM rating_tasks
          WHERE taskVersion = ?
            AND status = 'completed'
            AND completedAt IS NOT NULL
            AND (? IS NULL OR projectId = ?)
-         GROUP BY strftime('%H', completedAt)
+         GROUP BY EXTRACT(HOUR FROM completedAt AT TIME ZONE 'Asia/Shanghai')
          ORDER BY hour ASC`,
       )
       .all(taskVersion, projectId, projectId);

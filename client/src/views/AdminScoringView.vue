@@ -13,6 +13,7 @@ import type {
   ScoringTaskRecord,
   TaskSubmissionModeFilter
 } from '../types/image';
+import { formatDateTime } from '../utils/time';
 
 const message = useMessage();
 const dialog = useDialog();
@@ -77,7 +78,7 @@ function formatDuration(seconds: number | null | undefined) {
 }
 
 function formatDate(value: string | null | undefined) {
-  return value ? new Date(value).toLocaleString() : '-';
+  return formatDateTime(value);
 }
 
 function criterionLabel(key: TaskCriterionKey | null | undefined) {

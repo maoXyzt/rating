@@ -4691,7 +4691,7 @@ async function exportSubjectTaskReport(subjectId, res) {
       ["已完成任务", completedTasks],
       ["任务完成率", reportCompletionRate(completedTasks, totalTasks)],
       ["打分人数量", report.scorerCount],
-      ["导出时间", new Date().toLocaleString()],
+      ["导出时间", new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })],
     ],
     [24, 46],
   ).getCell(11, 2).numFmt = "0.00%";
@@ -7182,9 +7182,11 @@ app.put("/api/images/:id/score", async (req, res, next) => {
 });
 
 app.use((error, req, res, _next) => {
-  let status = error.status || 500;
+  const timedOut = error?.code === "57014" || error?.cause?.code === "57014";
+  let status = timedOut ? 503 : error.status || 500;
   if (status >= 500) console.error(error);
-  let message = error.message || "服务异常";
+  let message = timedOut ? "查询执行超时，请稍后重试" : error.message || "服务异常";
+  const code = timedOut ? "QUERY_TIMEOUT" : error.code || "REQUEST_FAILED";
 
   if (error instanceof multer.MulterError) {
     status = 400;
@@ -7199,7 +7201,7 @@ app.use((error, req, res, _next) => {
   if (error.retryAfterSeconds != null) {
     res.setHeader("Retry-After", String(error.retryAfterSeconds));
   }
-  res.status(status).json({ message, code: error.code || "REQUEST_FAILED" });
+  res.status(status).json({ message, code });
 });
 
 const queuedSubjects = await db

@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router';
 import { createUploadId, imageApi } from '../services/images';
 import { useTaskStackStore } from '../stores/taskStack';
 import type { SubjectItem } from '../types/image';
+import { formatDateTime } from '../utils/time';
 
 type PackageRow = Omit<SubjectItem, 'status'> & {
   status: SubjectItem['status'] | 'uploading';
@@ -172,7 +173,7 @@ const columns: DataTableColumns<PackageRow> = [
   { title: '图片数', key: 'imageCount', width: 88 },
   { title: '目录数', key: 'categoryCount', width: 88 },
   { title: '状态', key: 'status', width: 180, render: renderStatus },
-  { title: '导入时间', key: 'createdAt', width: 180, render: row => new Date(row.createdAt).toLocaleString() },
+  { title: '导入时间', key: 'createdAt', width: 180, render: row => formatDateTime(row.createdAt) },
   {
     title: '功能',
     key: 'actions',

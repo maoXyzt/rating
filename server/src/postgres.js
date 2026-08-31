@@ -58,7 +58,6 @@ function mapRow(row) {
 
 function normalizeSql(source, named = false) {
   let sql = String(source);
-  sql = sql.replace(/strftime\('\%H',\s*([A-Za-z_][A-Za-z0-9_]*)\)/gi, "EXTRACT(HOUR FROM $1::timestamp)");
   if (named) {
     const names = [];
     sql = sql.replace(/@([A-Za-z_][A-Za-z0-9_]*)/g, (_, name) => {

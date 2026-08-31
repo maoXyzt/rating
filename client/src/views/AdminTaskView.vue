@@ -6,6 +6,7 @@ import { imageApi } from '../services/images';
 import { taskCriteria } from '../constants/scoreCriteria';
 import { useTaskStackStore } from '../stores/taskStack';
 import type { AdminTaskListItem, ProjectItem, RankingRelation, RatingTask, RatingTaskItem, SubjectItem, SubjectTaskReport } from '../types/image';
+import { formatDateTime as formatBusinessDateTime } from '../utils/time';
 
 const route = useRoute();
 const router = useRouter();
@@ -148,7 +149,7 @@ function detailCorrectnessStateLabel(state: string) {
 }
 
 function formatDateTime(value: string | null | undefined) {
-  return value ? new Date(value).toLocaleString() : '未记录';
+  return value ? formatBusinessDateTime(value) : '未记录';
 }
 
 function formatDuration(value: number | null | undefined) {
@@ -419,7 +420,7 @@ const columns: DataTableColumns<AdminTaskListItem> = [
   },
   { title: '打分人', key: 'scorer', width: 110, render: row => row.scorer || '未分配' },
 
-  { title: '创建时间', key: 'createdAt', width: 180, render: row => new Date(row.createdAt).toLocaleString() },
+  { title: '创建时间', key: 'createdAt', width: 180, render: row => formatBusinessDateTime(row.createdAt) },
   {
     title: '操作',
     key: 'actions',

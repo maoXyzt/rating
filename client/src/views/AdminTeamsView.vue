@@ -3,6 +3,7 @@ import { h, onMounted, reactive, ref } from 'vue';
 import { NButton, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui';
 import { authApi } from '../services/auth';
 import type { AccountTeam, AvailabilityStatus } from '../types/auth';
+import { formatDateTime } from '../utils/time';
 
 const dialog = useDialog();
 const message = useMessage();
@@ -127,7 +128,7 @@ const columns: DataTableColumns<AccountTeam> = [
   },
   { title: '账号数', key: 'userCount', width: 110, render: row => row.userCount || 0 },
   { title: '关联项目', key: 'projectCount', width: 120, render: row => row.projectCount || 0 },
-  { title: '创建时间', key: 'createdAt', width: 180, render: row => row.createdAt ? new Date(row.createdAt).toLocaleString() : '-' },
+  { title: '创建时间', key: 'createdAt', width: 180, render: row => row.createdAt ? formatDateTime(row.createdAt) : '-' },
   {
     title: '操作',
     key: 'actions',
