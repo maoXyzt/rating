@@ -246,7 +246,8 @@ export function createAdminScoringService({
          GROUP BY rating_tasks.scorer
          ORDER BY directSubmitCount DESC,
                   averageDurationMs ASC,
-                  rating_tasks.scorer COLLATE NOCASE ASC
+                  LOWER(rating_tasks.scorer) ASC,
+                  rating_tasks.scorer ASC
          LIMIT ? OFFSET ?`,
       )
       .all(...filter.params, pageSize, (page - 1) * pageSize);

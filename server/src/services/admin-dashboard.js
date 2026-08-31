@@ -244,7 +244,7 @@ export function createAdminDashboardService({
            AND TRIM(rating_tasks.scorer) <> ''
            ${exportFilter.clause}
          GROUP BY users.id, rating_tasks.scorer, users.status
-         ORDER BY taskCount DESC, rating_tasks.scorer COLLATE NOCASE ASC`,
+         ORDER BY taskCount DESC, LOWER(rating_tasks.scorer) ASC, rating_tasks.scorer ASC`,
       )
       .all(taskVersion, ...exportFilter.params))
       .map((row) => ({
@@ -301,7 +301,7 @@ export function createAdminDashboardService({
          LEFT JOIN subject_task_templates ON subject_task_templates.subjectId = subjects.id
          WHERE project_packages.projectId = ?
          GROUP BY subjects.id, subjects.name, subjects.imageCount, subjects.categoryCount, subjects.taskStatus, subjects.status
-         ORDER BY project_packages.createdAt ASC, subjects.name COLLATE NOCASE ASC`,
+         ORDER BY project_packages.createdAt ASC, LOWER(subjects.name) ASC, subjects.name ASC`,
       )
       .all(projectId);
     if (rows.length || !fallbackPackageId) return rows;
@@ -435,7 +435,7 @@ export function createAdminDashboardService({
            AND TRIM(rating_tasks.scorer) <> ''
            AND (? IS NULL OR rating_tasks.projectId = ?)
          GROUP BY users.id, users.username, users.status
-         ORDER BY completedTaskCount DESC, totalTaskCount DESC, users.username COLLATE NOCASE ASC
+         ORDER BY completedTaskCount DESC, totalTaskCount DESC, LOWER(users.username) ASC, users.username ASC
          LIMIT 12`,
       )
       .all(taskVersion, projectId, projectId))
@@ -462,7 +462,7 @@ export function createAdminDashboardService({
            AND TRIM(rating_tasks.scorer) <> ''
            AND (? IS NULL OR rating_tasks.projectId = ?)
          GROUP BY teams.id, teams.name, teams.status
-         ORDER BY completedTaskCount DESC, totalTaskCount DESC, teams.name COLLATE NOCASE ASC
+         ORDER BY completedTaskCount DESC, totalTaskCount DESC, LOWER(teams.name) ASC, teams.name ASC
          LIMIT 12`,
       )
       .all(taskVersion, projectId, projectId))
@@ -552,7 +552,7 @@ export function createAdminDashboardService({
           AND rating_tasks.taskVersion = ?
          WHERE users.role = 'scorer'
          GROUP BY users.id, users.username, users.status
-         ORDER BY totalTaskCount DESC, users.username COLLATE NOCASE ASC`,
+         ORDER BY totalTaskCount DESC, LOWER(users.username) ASC, users.username ASC`,
       )
       .all(taskVersion))
       .map((row) => ({
@@ -578,7 +578,7 @@ export function createAdminDashboardService({
          LEFT JOIN rating_tasks ON rating_tasks.scorer = users.username
           AND rating_tasks.taskVersion = ?
          GROUP BY teams.id, teams.name, teams.status
-         ORDER BY totalTaskCount DESC, teams.name COLLATE NOCASE ASC`,
+         ORDER BY totalTaskCount DESC, LOWER(teams.name) ASC, teams.name ASC`,
       )
       .all(taskVersion))
       .map((row) => ({
@@ -651,7 +651,7 @@ export function createAdminDashboardService({
          WHERE rating_tasks.taskVersion = ?
            AND rating_tasks.scorer = ?
          GROUP BY projects.id, projects.name, projects.taskStatus
-         ORDER BY completedTaskCount DESC, totalTaskCount DESC, projects.name COLLATE NOCASE ASC`,
+         ORDER BY completedTaskCount DESC, totalTaskCount DESC, LOWER(projects.name) ASC, projects.name ASC`,
       )
       .all(taskVersion, user.username))
       .map((row) => {
@@ -713,7 +713,7 @@ export function createAdminDashboardService({
           AND rating_tasks.taskVersion = ?
          WHERE user_teams.teamId = ?
          GROUP BY users.id, users.username, users.status
-         ORDER BY totalTaskCount DESC, completedTaskCount DESC, users.username COLLATE NOCASE ASC`,
+         ORDER BY totalTaskCount DESC, completedTaskCount DESC, LOWER(users.username) ASC, users.username ASC`,
       )
       .all(taskVersion, team.id))
       .map((row) => ({
@@ -791,7 +791,7 @@ export function createAdminDashboardService({
           )
          WHERE teams.id IN (${placeholders(teamIds.length)})
          GROUP BY teams.id, teams.name, users.id, users.username
-         ORDER BY teams.name COLLATE NOCASE ASC, users.username COLLATE NOCASE ASC`,
+         ORDER BY LOWER(teams.name) ASC, teams.name ASC, LOWER(users.username) ASC, users.username ASC`,
       )
       .all(taskVersion, ...teamIds))
       .map((row) => {
@@ -828,7 +828,7 @@ export function createAdminDashboardService({
         `SELECT id AS teamId, name AS teamName
          FROM teams
          WHERE id IN (${placeholders(teamIds.length)})
-         ORDER BY name COLLATE NOCASE ASC`,
+         ORDER BY LOWER(name) ASC, name ASC`,
       )
       .all(...teamIds))
       .map((team) => ({

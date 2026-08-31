@@ -248,7 +248,7 @@ const selectProjectByNameStmt = db.prepare(`
   SELECT id
   FROM projects
   WHERE deletionRequestedAt IS NULL
-    AND TRIM(name) COLLATE NOCASE = ?
+    AND LOWER(TRIM(name)) = LOWER(?)
   LIMIT 1
 `);
 const selectProjectsStmt = db.prepare(`
@@ -340,7 +340,7 @@ const selectTeamByIdStmt = db.prepare(
   "SELECT id, name, status, createdAt, updatedAt FROM teams WHERE id = ?",
 );
 const selectTeamByNameStmt = db.prepare(
-  "SELECT id, name, status, createdAt, updatedAt FROM teams WHERE name = ? COLLATE NOCASE",
+  "SELECT id, name, status, createdAt, updatedAt FROM teams WHERE LOWER(name) = LOWER(?)",
 );
 const selectTeamsStmt = db.prepare(`
   SELECT teams.id, teams.name, teams.status, teams.createdAt, teams.updatedAt,
@@ -350,7 +350,7 @@ const selectTeamsStmt = db.prepare(`
   LEFT JOIN user_teams ON user_teams.teamId = teams.id
   LEFT JOIN project_teams ON project_teams.teamId = teams.id
   GROUP BY teams.id
-  ORDER BY teams.name COLLATE NOCASE ASC
+  ORDER BY LOWER(teams.name) ASC, teams.name ASC
 `);
 const insertTeamStmt = db.prepare(`
   INSERT INTO teams (id, name, status, createdAt, updatedAt)
@@ -374,7 +374,7 @@ const selectUserTeamsStmt = db.prepare(`
   FROM user_teams
   JOIN teams ON teams.id = user_teams.teamId
   WHERE user_teams.userId = ?
-  ORDER BY teams.name COLLATE NOCASE ASC
+  ORDER BY LOWER(teams.name) ASC, teams.name ASC
 `);
 const selectDisabledTeamForUserStmt = db.prepare(`
   SELECT teams.id, teams.name
@@ -382,7 +382,7 @@ const selectDisabledTeamForUserStmt = db.prepare(`
   JOIN teams ON teams.id = user_teams.teamId
   WHERE user_teams.userId = ?
     AND teams.status = 'disabled'
-  ORDER BY teams.name COLLATE NOCASE ASC
+  ORDER BY LOWER(teams.name) ASC, teams.name ASC
   LIMIT 1
 `);
 const deleteUserTeamsStmt = db.prepare("DELETE FROM user_teams WHERE userId = ?");
@@ -396,7 +396,7 @@ const selectProjectTeamsStmt = db.prepare(`
   FROM project_teams
   JOIN teams ON teams.id = project_teams.teamId
   WHERE project_teams.projectId = ?
-  ORDER BY teams.name COLLATE NOCASE ASC
+  ORDER BY LOWER(teams.name) ASC, teams.name ASC
 `);
 const deleteProjectTeamsStmt = db.prepare("DELETE FROM project_teams WHERE projectId = ?");
 const insertProjectTeamStmt = db.prepare(`
@@ -417,7 +417,7 @@ const selectAllScorerNamesStmt = db.prepare(`
   SELECT username
   FROM users
   WHERE role = 'scorer'
-  ORDER BY username COLLATE NOCASE ASC
+  ORDER BY LOWER(username) ASC, username ASC
 `);
 const selectUserByUsernameStmt = db.prepare(
   `SELECT ${userSelectColumns} FROM users WHERE username = ?`,
@@ -534,7 +534,7 @@ const selectScorerUsersPageStmt = db.prepare(`
   SELECT ${userSelectColumns}
   FROM users
   WHERE role = 'scorer'
-  ORDER BY createdAt DESC, username COLLATE NOCASE ASC
+  ORDER BY createdAt DESC, LOWER(username) ASC, username ASC
   LIMIT ? OFFSET ?
 `);
 const updateUserLoginStmt = db.prepare(`
@@ -767,7 +767,7 @@ const selectSubjectAssignedScorerCountsStmt = db.prepare(`
     AND scorer IS NOT NULL
     AND TRIM(scorer) <> ''
   GROUP BY scorer
-  ORDER BY scorer COLLATE NOCASE ASC
+  ORDER BY LOWER(scorer) ASC, scorer ASC
 `);
 const selectAvailableSubjectScorersStmt = db.prepare(`
   SELECT ${userSelectColumns}
@@ -787,7 +787,7 @@ const selectAvailableSubjectScorersStmt = db.prepare(`
       WHERE user_teams.userId = users.id
         AND teams.status = 'disabled'
     )
-  ORDER BY username COLLATE NOCASE ASC
+  ORDER BY LOWER(username) ASC, username ASC
 `);
 const selectReassignableTaskIdsStmt = db.prepare(`
   SELECT id
@@ -2778,7 +2778,7 @@ async function projectRelatedRowsByIds(projectIds) {
        FROM project_teams
        JOIN teams ON teams.id = project_teams.teamId
        WHERE project_teams.projectId IN (${placeholders(ids.length)})
-       ORDER BY project_teams.projectId ASC, teams.name COLLATE NOCASE ASC`,
+       ORDER BY project_teams.projectId ASC, LOWER(teams.name) ASC, teams.name ASC`,
     )
     .all(...ids);
   const relatedByProjectId = new Map();
@@ -2995,7 +2995,7 @@ async function listTeams(query = {}) {
        LEFT JOIN project_teams ON project_teams.teamId = teams.id
        WHERE teams.status = ?
        GROUP BY teams.id
-       ORDER BY teams.name COLLATE NOCASE ASC`,
+       ORDER BY LOWER(teams.name) ASC, teams.name ASC`,
     )
     .all(status))
     .map(teamDto);
@@ -3641,7 +3641,7 @@ async function listScorerUsers(query = {}) {
       `SELECT ${userSelectColumns}
        FROM users
        ${where}
-       ORDER BY createdAt DESC, username COLLATE NOCASE ASC
+       ORDER BY createdAt DESC, LOWER(username) ASC, username ASC
        LIMIT ? OFFSET ?`,
     )
     .all(...params, pageSize, (page - 1) * pageSize);
@@ -3813,7 +3813,7 @@ async function listScorersByTeamIds(teamIds, matchMode = "all") {
          )
        GROUP BY users.id, users.username
        ${matchClause}
-       ORDER BY users.username COLLATE NOCASE ASC`,
+       ORDER BY LOWER(users.username) ASC, users.username ASC`,
     )
     .all(...params))
     .map((user) => ({ id: user.id, username: user.username }));
@@ -4377,10 +4377,11 @@ function buildSubjectTaskFilter(projectId, query = {}) {
 async function listSubjectTaskOptions(projectId) {
   const scorers = (await db
     .prepare(
-      `SELECT DISTINCT scorer
+      `SELECT scorer
        FROM rating_tasks
        WHERE projectId = ? AND taskVersion = ? AND scorer IS NOT NULL AND scorer <> ''
-       ORDER BY scorer COLLATE NOCASE ASC`,
+       GROUP BY scorer
+       ORDER BY LOWER(scorer) ASC, scorer ASC`,
     )
     .all(projectId, taskVersion))
     .map((row) => row.scorer);
@@ -4579,11 +4580,14 @@ async function getSubjectTaskReportSummary(subjectId) {
     .all(subjectId, taskVersion);
   const scorerCriteriaRows = await db
     .prepare(
-      `SELECT DISTINCT COALESCE(NULLIF(TRIM(scorer), ''), '未分配') AS scorer,
+      `SELECT COALESCE(NULLIF(TRIM(scorer), ''), '未分配') AS scorer,
               taskType
        FROM rating_tasks
        WHERE projectId = ? AND taskVersion = ?
-       ORDER BY scorer COLLATE NOCASE, taskType ASC`,
+       GROUP BY COALESCE(NULLIF(TRIM(scorer), ''), '未分配'), taskType
+       ORDER BY LOWER(COALESCE(NULLIF(TRIM(scorer), ''), '未分配')) ASC,
+                COALESCE(NULLIF(TRIM(scorer), ''), '未分配') ASC,
+                taskType ASC`,
     )
     .all(subjectId, taskVersion);
   const scorerMap = new Map();
@@ -6071,12 +6075,12 @@ async function getCategories(subjectId) {
   const rows = subjectId
     ? await db
         .prepare(
-          "SELECT DISTINCT category FROM images WHERE subjectId = ? ORDER BY category COLLATE NOCASE",
+          "SELECT category FROM images WHERE subjectId = ? GROUP BY category ORDER BY LOWER(category) ASC, category ASC",
         )
         .all(String(subjectId))
     : await db
         .prepare(
-          "SELECT DISTINCT category FROM images ORDER BY category COLLATE NOCASE",
+          "SELECT category FROM images GROUP BY category ORDER BY LOWER(category) ASC, category ASC",
         )
         .all();
   return rows.map((row) => row.category);
@@ -6089,12 +6093,12 @@ async function getScorers(subjectId) {
   const rows = subjectId
     ? await db
         .prepare(
-          `SELECT DISTINCT scorer FROM images WHERE ${where} ORDER BY scorer COLLATE NOCASE`,
+          `SELECT scorer FROM images WHERE ${where} GROUP BY scorer ORDER BY LOWER(scorer) ASC, scorer ASC`,
         )
         .all(String(subjectId))
     : await db
         .prepare(
-          `SELECT DISTINCT scorer FROM images WHERE ${where} ORDER BY scorer COLLATE NOCASE`,
+          `SELECT scorer FROM images WHERE ${where} GROUP BY scorer ORDER BY LOWER(scorer) ASC, scorer ASC`,
         )
         .all();
   return rows.map((row) => row.scorer);
