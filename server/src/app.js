@@ -5144,7 +5144,10 @@ async function completeAssignedTask(taskId, body = {}) {
   if (!scorer) throw httpError(400, "缺少打分人");
   const task = await selectTaskByIdStmt.get(taskId);
   if (!task) throw httpError(404, "任务不存在");
-  if (task.status === "completed") throw httpError(409, "该任务已完成");
+  if (task.status === "completed") {
+    if (task.scorer === scorer) return (await hydrateTaskRows([task]))[0];
+    throw httpError(409, "该任务已完成");
+  }
   if (task.status !== "assigned" || task.scorer !== scorer)
     throw httpError(403, "该任务未分配给当前打分人");
   if (body.projectId && String(body.projectId) !== (task.projectId || task.subjectId))
@@ -7185,10 +7188,19 @@ app.put("/api/images/:id/score", async (req, res, next) => {
 
 app.use((error, req, res, _next) => {
   const timedOut = error?.code === "57014" || error?.cause?.code === "57014";
-  let status = timedOut ? 503 : error.status || 500;
+  const poolQueueTimedOut = error?.message === "timeout exceeded when trying to connect";
+  let status = timedOut || poolQueueTimedOut ? 503 : error.status || 500;
   if (status >= 500) console.error(error);
-  let message = timedOut ? "查询执行超时，请稍后重试" : error.message || "服务异常";
-  const code = timedOut ? "QUERY_TIMEOUT" : error.code || "REQUEST_FAILED";
+  let message = timedOut
+    ? "查询执行超时，请稍后重试"
+    : poolQueueTimedOut
+      ? "请求较多，请稍后重试"
+      : error.message || "服务异常";
+  const code = timedOut
+    ? "QUERY_TIMEOUT"
+    : poolQueueTimedOut
+      ? "QUERY_QUEUE_TIMEOUT"
+      : error.code || "REQUEST_FAILED";
 
   if (error instanceof multer.MulterError) {
     status = 400;
