@@ -16,7 +16,7 @@ const taskListState = ref<'loading' | 'ready' | 'stale' | 'unavailable'>('loadin
 const taskStatsState = ref<'loading' | 'ready' | 'stale' | 'unavailable'>('loading');
 const taskTotal = ref(0);
 const taskPage = ref(1);
-const taskPageSize = ref(10);
+const taskPageSize = ref(5);
 const taskHasMore = ref(false);
 const taskCursors = ref<Record<number, string | null>>({ 1: null });
 const activeTask = ref<RatingTask | null>(null);
@@ -343,7 +343,7 @@ onMounted(() => {
       <div class="scorer-task-table-footer">
         <n-pagination v-if="taskHasMore || taskPage > 1" :page="taskPage" :page-size="taskPageSize"
           :page-count="taskPage + (taskHasMore ? 1 : 0)" show-size-picker
-          :page-sizes="[10, 20, 50]" :prefix="paginationPrefix" @update:page="changePage"
+          :page-sizes="[5, 10, 20, 50]" :prefix="paginationPrefix" @update:page="changePage"
           @update:page-size="changePageSize" />
       </div>
     </div>

@@ -179,10 +179,10 @@ const sessionSeenWriteAt = new Map();
 const subjectTaskReportCache = new Map();
 const subjectTaskReportCacheTtlMs = 15 * 1000;
 const sessionSeenWriteIntervalMs = 5 * 60 * 1000;
-// Keep task generation transactions large enough to amortize SQLite commit
-// overhead without holding the write lock for the entire job.
-const TASK_WRITE_BATCH_SIZE = 500;
-const TASK_ASSIGN_BATCH_SIZE = 500;
+// Keep task generation transactions short so large jobs do not monopolize
+// SQLite's write lock for long stretches.
+const TASK_WRITE_BATCH_SIZE = 100;
+const TASK_ASSIGN_BATCH_SIZE = 100;
 const sessionDurationMs = 7 * 24 * 60 * 60 * 1000;
 
 function taskGenerationJobDto(job) {
@@ -4000,34 +4000,86 @@ async function loadUnmaterializedProjectTaskTemplates(projectId, limit) {
   }));
 }
 
-function insertTemplateTask(projectId, packageId, template) {
+function buildGeneratedTaskRecord(projectId, template, scorer) {
   const imageIds = template.items.map((item) => item.imageId);
-  const taskType = dimensionTaskType(projectId, packageId, template.criterion);
+  const taskType = dimensionTaskType(projectId, template.packageId, template.criterion);
   const id = deterministicTaskId(projectId, taskType, imageIds);
   const now = nowIso();
-  const result = insertRatingTaskStmt.run({
+  return {
     id,
-    subjectId: packageId,
+    subjectId: template.packageId,
     projectId,
     taskVersion,
     round: Number(template.round || 1),
     taskType,
+    status: scorer ? "assigned" : "pending",
+    scorer: scorer || null,
+    ranking: null,
     assignmentKey: crypto.randomInt(1, 2147483647),
     imageKey: template.imageKey,
     createdAt: now,
     updatedAt: now,
-  });
-  if (result.changes === 0) return null;
-
-  template.items.forEach((item) => {
-    insertRatingTaskItemStmt.run({
+    items: template.items.map((item) => ({
       taskId: id,
       imageId: item.imageId,
       position: item.position,
       role: item.role,
-    });
+    })),
+  };
+}
+
+function bulkInsertRatingTasks(taskRows) {
+  if (!taskRows.length) return 0;
+  const sql = `
+    INSERT OR IGNORE INTO rating_tasks (
+      id, subjectId, projectId, taskVersion, round, taskType, status, scorer, ranking, assignmentKey, imageKey, createdAt, updatedAt
+    ) VALUES ${taskRows.map(() => `(${placeholders(13)})`).join(", ")}
+  `;
+  const params = [];
+  taskRows.forEach((row) => {
+    params.push(
+      row.id,
+      row.subjectId,
+      row.projectId,
+      row.taskVersion,
+      row.round,
+      row.taskType,
+      row.status,
+      row.scorer,
+      row.ranking,
+      row.assignmentKey,
+      row.imageKey,
+      row.createdAt,
+      row.updatedAt,
+    );
   });
-  return id;
+  return db.prepare(sql).run(...params).changes;
+}
+
+function bulkInsertRatingTaskItems(itemRows) {
+  if (!itemRows.length) return 0;
+  const sql = `
+    INSERT OR IGNORE INTO rating_task_items (taskId, imageId, position, role)
+    VALUES ${itemRows.map(() => "(?, ?, ?, ?)").join(", ")}
+  `;
+  const params = [];
+  itemRows.forEach((row) => {
+    params.push(row.taskId, row.imageId, row.position, row.role);
+  });
+  return db.prepare(sql).run(...params).changes;
+}
+
+function compressTaskAllocations(plan) {
+  const allocations = [];
+  for (const scorer of plan) {
+    const last = allocations[allocations.length - 1];
+    if (last && last.scorer === scorer) {
+      last.taskCount += 1;
+    } else {
+      allocations.push({ scorer, taskCount: 1 });
+    }
+  }
+  return allocations;
 }
 
 function parseTaskPagination(query = {}) {
@@ -5625,7 +5677,12 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
     (total, allocation) => total + allocation.taskCount,
     0,
   );
-  if (!requestedTaskCount) return 0;
+  if (!requestedTaskCount) {
+    return {
+      assignedCount: 0,
+      taskIds: [],
+    };
+  }
 
   const pendingTasks = selectPendingProjectTaskIdsStmt.all(
     projectId,
@@ -5641,6 +5698,7 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
     Array.from({ length: taskCount }, () => scorer),
   );
   const updatedAt = nowIso();
+  const assignedTaskIds = [];
 
   for (let start = 0; start < selectedTasks.length; start += TASK_ASSIGN_BATCH_SIZE) {
     const batch = selectedTasks.slice(start, start + TASK_ASSIGN_BATCH_SIZE);
@@ -5673,6 +5731,7 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
       } catch {}
       throw error;
     }
+    assignedTaskIds.push(...batch.map((task) => task.id));
     const processed = start + batch.length;
     onProgress?.(processed, selectedTasks.length);
     if (processed < selectedTasks.length) await yieldToEventLoop();
@@ -5680,13 +5739,37 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
 
   invalidateTaskSummaryCaches(projectId);
   invalidateScorerQueryCaches();
-  return selectedTasks.length;
+  return {
+    assignedCount: selectedTasks.length,
+    taskIds: assignedTaskIds,
+  };
 }
 
-function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus) {
+function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus, assignedTaskIds = []) {
   try {
-    for (let start = 0; start < taskIds.length; start += 500) {
-      const batch = taskIds.slice(start, start + 500);
+    for (let start = 0; start < assignedTaskIds.length; start += TASK_ASSIGN_BATCH_SIZE) {
+      const batch = assignedTaskIds.slice(start, start + TASK_ASSIGN_BATCH_SIZE);
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        db.prepare(
+          `UPDATE rating_tasks
+           SET status = 'pending',
+               scorer = NULL,
+               updatedAt = ?
+           WHERE projectId = ?
+             AND id IN (${placeholders(batch.length)})
+             AND status = 'assigned'`,
+        ).run(nowIso(), projectId, ...batch);
+        db.exec("COMMIT");
+      } catch (error) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {}
+        throw error;
+      }
+    }
+    for (let start = 0; start < taskIds.length; start += TASK_WRITE_BATCH_SIZE) {
+      const batch = taskIds.slice(start, start + TASK_WRITE_BATCH_SIZE);
       db.exec("BEGIN IMMEDIATE");
       try {
         db.prepare(
@@ -5707,6 +5790,7 @@ function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus) {
       taskStatus: previousTaskStatus,
       updatedAt: nowIso(),
     });
+    invalidateTaskSummaryCaches(projectId);
     invalidateScorerQueryCaches();
   } catch (cleanupError) {
     console.error(`Failed to roll back generated tasks for ${projectId}`, cleanupError);
@@ -5724,6 +5808,7 @@ async function generateSubjectTasks(projectId, assignment, onProgress) {
   }
   const previousTaskStatus = project.taskStatus;
   const generatedTaskIds = [];
+  const assignedTaskIds = [];
 
   try {
     let createdCount = 0;
@@ -5739,45 +5824,65 @@ async function generateSubjectTasks(projectId, assignment, onProgress) {
       throw httpError(400, `本次最多还能下发 ${availableTaskCount} 个任务`);
     }
 
+    const assigneePlan = assignment.allocations.flatMap(({ scorer, taskCount }) =>
+      Array.from({ length: taskCount }, () => scorer),
+    );
+    const createdAssigneePlan = assigneePlan.slice(0, templates.length);
+    const pendingAssigneePlan = assigneePlan.slice(templates.length);
+
     onProgress?.({
-      stage: templatesNeeded ? "正在生成本次任务" : "正在分配已生成任务",
-      progress: templatesNeeded ? 5 : 70,
+      stage: templates.length ? "正在生成并分配本次任务" : "正在分配已有任务",
+      progress: templates.length ? 5 : 70,
     });
 
     for (let start = 0; start < templates.length; start += TASK_WRITE_BATCH_SIZE) {
       const batch = templates.slice(start, start + TASK_WRITE_BATCH_SIZE);
+      const taskRows = batch.map((template, index) =>
+        buildGeneratedTaskRecord(
+          projectId,
+          template,
+          createdAssigneePlan[start + index] || null,
+        ),
+      );
+      const itemRows = taskRows.flatMap((task) => task.items);
+
       db.exec("BEGIN IMMEDIATE");
       try {
-        for (const template of batch) {
-          const taskId = insertTemplateTask(projectId, template.packageId, template);
-          if (taskId) {
-            createdCount++;
-            generatedTaskIds.push(taskId);
-          }
-        }
+        const result = bulkInsertRatingTasks(taskRows);
+        bulkInsertRatingTaskItems(itemRows);
         db.exec("COMMIT");
+        createdCount += result;
+        generatedTaskIds.push(...taskRows.map((task) => task.id));
       } catch (error) {
         try {
           db.exec("ROLLBACK");
         } catch {}
         throw error;
       }
+
       onProgress?.({
-        stage: "正在生成本次任务",
-        progress: 5 + Math.round((Math.min(start + batch.length, templates.length) / templates.length) * 70),
+        stage: "正在生成并分配本次任务",
+        progress: 5 + Math.round((Math.min(start + batch.length, templates.length) / templates.length) * 65),
       });
       if (start + batch.length < templates.length) await yieldToEventLoop();
     }
 
-    onProgress?.({ stage: "正在按配额分配任务", progress: 75 });
-    assignedCount = await assignGeneratedTasks(
-      projectId,
-      assignment.allocations,
-      (current, total) => onProgress?.({
-        stage: "正在按配额分配任务",
-        progress: 75 + (total ? Math.round((current / total) * 23) : 0),
-      }),
-    );
+    if (pendingAssigneePlan.length) {
+      onProgress?.({ stage: "正在分配已有任务", progress: templates.length ? 75 : 70 });
+      const pendingAllocations = compressTaskAllocations(pendingAssigneePlan);
+      const assignedResult = await assignGeneratedTasks(
+        projectId,
+        pendingAllocations,
+        (current, total) => onProgress?.({
+          stage: "正在分配已有任务",
+          progress: (templates.length ? 75 : 70) + (total ? Math.round((current / total) * 20) : 0),
+        }),
+      );
+      assignedCount = createdCount + assignedResult.assignedCount;
+      assignedTaskIds.push(...assignedResult.taskIds);
+    } else {
+      assignedCount = createdCount;
+    }
 
     syncProjectTeams(projectId, assignment.teamIds, nowIso());
     updateSubjectTaskStatusStmt.run({
@@ -5785,6 +5890,7 @@ async function generateSubjectTasks(projectId, assignment, onProgress) {
       taskStatus: "scoring",
       updatedAt: nowIso(),
     });
+    invalidateTaskSummaryCaches(projectId);
     const updatedProject = selectProjectByIdStmt.get(projectId);
     const taskStats = getProjectTaskStats(projectId);
     const taskCount = taskStats.total;
@@ -5800,7 +5906,7 @@ async function generateSubjectTasks(projectId, assignment, onProgress) {
       taskVersion,
     };
   } catch (error) {
-    rollbackGeneratedTasks(projectId, generatedTaskIds, previousTaskStatus);
+    rollbackGeneratedTasks(projectId, generatedTaskIds, previousTaskStatus, assignedTaskIds);
     throw error;
   }
 }
