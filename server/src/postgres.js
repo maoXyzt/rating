@@ -57,15 +57,13 @@ function mapRow(row) {
 }
 
 function normalizeSql(source, named = false) {
-  let sql = String(source).replace(/\bBEGIN\s+IMMEDIATE\b/gi, "BEGIN");
+  let sql = String(source);
   sql = sql.replace(/TRIM\(([^)]+)\)\s+COLLATE\s+NOCASE\s*=\s*TRIM\(([^)]+)\)\s+COLLATE\s+NOCASE/gi, "LOWER(TRIM($1)) = LOWER(TRIM($2))");
   sql = sql.replace(/(TRIM\([^)]*\)|[A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(\?|@[A-Za-z_][A-Za-z0-9_]*)\s+COLLATE\s+NOCASE/gi, "LOWER($1) = LOWER($2)");
   sql = sql.replace(/(TRIM\([^)]*\)|[A-Za-z_][A-Za-z0-9_.]*)\s+COLLATE\s+NOCASE\s*=\s*(\?|@[A-Za-z_][A-Za-z0-9_]*)/gi, "LOWER($1) = LOWER($2)");
   sql = sql.replace(/(\?|@[A-Za-z_][A-Za-z0-9_]*)\s+COLLATE\s+NOCASE\s*=\s*(TRIM\([^)]*\)|[A-Za-z_][A-Za-z0-9_.]*)/gi, "LOWER($1) = LOWER($2)");
   sql = sql.replace(/\s+COLLATE\s+NOCASE\b/gi, "");
   sql = sql.replace(/strftime\('\%H',\s*([A-Za-z_][A-Za-z0-9_]*)\)/gi, "EXTRACT(HOUR FROM $1::timestamp)");
-  const ignoreInsert = /INSERT\s+OR\s+IGNORE\s+INTO/i.test(sql);
-  sql = sql.replace(/INSERT\s+OR\s+IGNORE\s+INTO/gi, "INSERT INTO");
   if (named) {
     const names = [];
     sql = sql.replace(/@([A-Za-z_][A-Za-z0-9_]*)/g, (_, name) => {
@@ -74,12 +72,10 @@ function normalizeSql(source, named = false) {
       names.push(name);
       return `$${names.length}`;
     });
-    if (ignoreInsert) sql = `${sql.replace(/;\s*$/, "")} ON CONFLICT DO NOTHING;`;
     return { sql, names };
   }
   let index = 0;
   sql = sql.replace(/\?/g, () => `$${++index}`);
-  if (ignoreInsert) sql = `${sql.replace(/;\s*$/, "")} ON CONFLICT DO NOTHING;`;
   return { sql, names: null };
 }
 

@@ -295,8 +295,9 @@ const insertProjectStmt = db.prepare(`
   )
 `);
 const insertProjectPackageStmt = db.prepare(`
-  INSERT OR IGNORE INTO project_packages (projectId, packageId, createdAt)
+  INSERT INTO project_packages (projectId, packageId, createdAt)
   VALUES (@projectId, @packageId, @createdAt)
+  ON CONFLICT DO NOTHING
 `);
 const deleteProjectPackagesStmt = db.prepare(
   "DELETE FROM project_packages WHERE projectId = ?",
@@ -386,8 +387,9 @@ const selectDisabledTeamForUserStmt = db.prepare(`
 `);
 const deleteUserTeamsStmt = db.prepare("DELETE FROM user_teams WHERE userId = ?");
 const insertUserTeamStmt = db.prepare(`
-  INSERT OR IGNORE INTO user_teams (userId, teamId, createdAt)
+  INSERT INTO user_teams (userId, teamId, createdAt)
   VALUES (@userId, @teamId, @createdAt)
+  ON CONFLICT DO NOTHING
 `);
 const selectProjectTeamsStmt = db.prepare(`
   SELECT teams.id, teams.name, teams.status
@@ -398,8 +400,9 @@ const selectProjectTeamsStmt = db.prepare(`
 `);
 const deleteProjectTeamsStmt = db.prepare("DELETE FROM project_teams WHERE projectId = ?");
 const insertProjectTeamStmt = db.prepare(`
-  INSERT OR IGNORE INTO project_teams (projectId, teamId, createdAt)
+  INSERT INTO project_teams (projectId, teamId, createdAt)
   VALUES (@projectId, @teamId, @createdAt)
+  ON CONFLICT DO NOTHING
 `);
 const selectImageByIdStmt = db.prepare(
   `SELECT ${imageSelectColumns} FROM images WHERE id = ?`,
@@ -699,15 +702,17 @@ const updateCompletedTaskStmt = db.prepare(`
     AND scorer = @scorer
 `);
 const insertRatingTaskStmt = db.prepare(`
-  INSERT OR IGNORE INTO rating_tasks (
+  INSERT INTO rating_tasks (
     id, subjectId, projectId, taskVersion, round, taskType, status, scorer, ranking, assignmentKey, imageKey, createdAt, updatedAt
   ) VALUES (
     @id, @subjectId, @projectId, @taskVersion, @round, @taskType, 'pending', NULL, NULL, @assignmentKey, @imageKey, @createdAt, @updatedAt
   )
+  ON CONFLICT DO NOTHING
 `);
 const insertRatingTaskItemStmt = db.prepare(`
-  INSERT OR IGNORE INTO rating_task_items (taskId, imageId, position, role)
+  INSERT INTO rating_task_items (taskId, imageId, position, role)
   VALUES (@taskId, @imageId, @position, @role)
+  ON CONFLICT DO NOTHING
 `);
 const insertSubjectTaskTemplateStmt = db.prepare(`
   INSERT INTO subject_task_templates (
@@ -840,7 +845,7 @@ const deleteQueuedSubjectStmt = db.prepare(
   "DELETE FROM subjects WHERE id = ? AND deletionRequestedAt IS NOT NULL",
 );
 const insertImageStmt = db.prepare(`
-  INSERT OR IGNORE INTO images (
+  INSERT INTO images (
     id, subjectId, filename, originalPath, storagePath, thumbnailPath, mimeType, category, directory, isInfographic, prompt, catalogData, importBatch,
     overall, creativity, mood, composition, color, lighting, realism, detail, discomfort,
     promptAlignment, textCorrectness, anatomyNormality, informationClarity, designQuality, typography,
@@ -851,6 +856,7 @@ const insertImageStmt = db.prepare(`
     NULL, NULL, NULL, NULL, NULL, NULL,
     NULL, NULL, @createdAt, @updatedAt
   )
+  ON CONFLICT DO NOTHING
 `);
 const updateImageScoreStmt = db.prepare(`
   UPDATE images
@@ -1898,7 +1904,7 @@ async function importZipArchive(
     // All archive I/O and image validation has completed before this write
     // transaction. Keep read indexes in place so imports do not rebuild the
     // entire images table while holding a write transaction.
-    await db.exec("BEGIN IMMEDIATE");
+    await db.exec("BEGIN");
     transactionOpen = true;
     await insertSubjectStmt.run({
       id: subjectId,
@@ -2416,7 +2422,7 @@ async function addFeedbackMessage(id, body, user) {
     requestedStatus ||
     (feedback.status === "pending" ? "processing" : feedback.status);
   const repliedAt = nowIso();
-  await db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN");
   try {
     await insertFeedbackMessageStmt.run({
       id: crypto.randomUUID(),
@@ -3128,7 +3134,7 @@ async function createProject(body = {}) {
   const packageId = packageIds[0];
   const now = nowIso();
   const id = crypto.randomUUID();
-  await db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN");
   try {
     await assertProjectNameAvailable(name);
     await insertProjectStmt.run({ id, name, icon, packageId, createdAt: now, updatedAt: now });
@@ -3164,7 +3170,7 @@ async function updateProject(id, body = {}) {
     throw httpError(409, "项目已生成任务，不能更换关联图包");
   }
   const now = nowIso();
-  await db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN");
   try {
     await assertProjectNameAvailable(name, id);
     await updateProjectStmt.run({ id, name, icon, packageId, updatedAt: now });
@@ -3216,7 +3222,7 @@ async function deleteProject(id) {
     throw httpError(409, "任务正在生成，请等待生成完成后再删除项目");
   }
 
-  await db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN");
   try {
     const deletedTaskCount = (await deleteUncompletedProjectTasksStmt.run(project._id)).changes;
     await deleteProjectUserLinksStmt.run(project._id);
@@ -3267,7 +3273,7 @@ async function deleteQueuedSubject(subjectId) {
       );
     }
 
-    await db.exec("BEGIN IMMEDIATE");
+    await db.exec("BEGIN");
     try {
       await deleteQueuedSubjectStmt.run(subjectId);
       await db.exec("COMMIT");
@@ -3653,7 +3659,7 @@ async function createScorerUser(body = {}) {
   const teamNames = normalizeTeamNames(body.teamNames);
   if (username === "admin") throw httpError(409, "admin 是管理员账号");
   const now = nowIso();
-  await db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN");
   try {
     if (await selectUserByUsernameStmt.get(username)) {
       throw httpError(409, "账号已存在");
@@ -3708,7 +3714,7 @@ async function createScorerUsers(body = {}) {
   const created = [];
   const now = nowIso();
 
-  await db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN");
   try {
     for (const username of usernames) {
       if (await selectUserByUsernameStmt.get(username)) {
@@ -3756,7 +3762,7 @@ async function updateScorerUser(id, body = {}) {
   const shouldSyncTeams = Object.hasOwn(body, "teamNames");
   const teamNames = shouldSyncTeams ? normalizeTeamNames(body.teamNames) : [];
   const now = nowIso();
-  await db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN");
   try {
     await updateScorerUserStmt.run({
       id: user.id,
@@ -4008,9 +4014,10 @@ function buildGeneratedTaskRecord(projectId, template, scorer) {
 async function bulkInsertRatingTasks(taskRows) {
   if (!taskRows.length) return 0;
   const sql = `
-    INSERT OR IGNORE INTO rating_tasks (
+    INSERT INTO rating_tasks (
       id, subjectId, projectId, taskVersion, round, taskType, status, scorer, ranking, assignmentKey, imageKey, createdAt, updatedAt
     ) VALUES ${taskRows.map(() => `(${placeholders(13)})`).join(", ")}
+    ON CONFLICT DO NOTHING
   `;
   const params = [];
   taskRows.forEach((row) => {
@@ -4036,8 +4043,9 @@ async function bulkInsertRatingTasks(taskRows) {
 async function bulkInsertRatingTaskItems(itemRows) {
   if (!itemRows.length) return 0;
   const sql = `
-    INSERT OR IGNORE INTO rating_task_items (taskId, imageId, position, role)
+    INSERT INTO rating_task_items (taskId, imageId, position, role)
     VALUES ${itemRows.map(() => "(?, ?, ?, ?)").join(", ")}
+    ON CONFLICT DO NOTHING
   `;
   const params = [];
   itemRows.forEach((row) => {
@@ -5171,7 +5179,7 @@ async function completeAssignedTask(taskId, body = {}) {
   const startedAt = new Date(Date.now() - durationMs).toISOString();
   const projectId = task.projectId || task.subjectId;
 
-  await db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN");
   try {
     const result = await completeAssignedTaskStmt.run({
       id: task.id,
@@ -5248,7 +5256,7 @@ async function updateCompletedTask(taskId, body = {}) {
   );
   const editedAt = nowIso();
 
-  await db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN");
   try {
     const result = await updateCompletedTaskStmt.run({
       id: task.id,
@@ -5611,7 +5619,7 @@ async function reassignSubjectTasks(subjectId, body = {}) {
     assignees.names.map((name) => [name, 0]),
   );
 
-  await db.exec("BEGIN IMMEDIATE");
+  await db.exec("BEGIN");
   try {
     await Promise.all(selectedTasks.map(async (task, index) => {
       const scorer = assignmentPlan?.[index]
@@ -5679,7 +5687,7 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
 
   for (let start = 0; start < selectedTasks.length; start += TASK_ASSIGN_BATCH_SIZE) {
     const batch = selectedTasks.slice(start, start + TASK_ASSIGN_BATCH_SIZE);
-    await db.exec("BEGIN IMMEDIATE");
+    await db.exec("BEGIN");
     try {
       const whenClauses = batch.map(() => "WHEN ? THEN ?");
       const taskIds = batch.map((task) => task.id);
@@ -5726,7 +5734,7 @@ async function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus, as
   try {
     for (let start = 0; start < assignedTaskIds.length; start += TASK_ASSIGN_BATCH_SIZE) {
       const batch = assignedTaskIds.slice(start, start + TASK_ASSIGN_BATCH_SIZE);
-      await db.exec("BEGIN IMMEDIATE");
+      await db.exec("BEGIN");
       try {
         await db.prepare(
           `UPDATE rating_tasks
@@ -5747,7 +5755,7 @@ async function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus, as
     }
     for (let start = 0; start < taskIds.length; start += TASK_WRITE_BATCH_SIZE) {
       const batch = taskIds.slice(start, start + TASK_WRITE_BATCH_SIZE);
-      await db.exec("BEGIN IMMEDIATE");
+      await db.exec("BEGIN");
       try {
         await db.prepare(
           `DELETE FROM rating_tasks
@@ -5823,7 +5831,7 @@ async function generateSubjectTasks(projectId, assignment, onProgress) {
       );
       const itemRows = taskRows.flatMap((task) => task.items);
 
-      await db.exec("BEGIN IMMEDIATE");
+      await db.exec("BEGIN");
       try {
         const result = await bulkInsertRatingTasks(taskRows);
         await bulkInsertRatingTaskItems(itemRows);

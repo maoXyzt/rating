@@ -458,7 +458,7 @@ export function createAdminScoringService({
     let changed = 0;
 
     onProgress?.({ stage: "正在回退任务", progress: 20 });
-    await db.exec("BEGIN IMMEDIATE");
+    await db.exec("BEGIN");
     try {
       for (const ids of chunk(taskIds)) {
         changed += (await db
