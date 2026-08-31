@@ -49,9 +49,9 @@ export function createQueryWorkerPool(options = {}) {
   let cacheEpoch = 0;
   const pending = new Map();
   const ttlByOperation = {
-    assignedTasks: 1000,
-    assignedTaskOptions: 60000,
-    scorerDashboard: 2000,
+    assignedTasks: 2000,
+    assignedTaskOptions: 300000,
+    scorerDashboard: 10000,
     ...(options.ttlByOperation || {}),
   };
 
