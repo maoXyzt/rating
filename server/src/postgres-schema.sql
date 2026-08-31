@@ -4,17 +4,17 @@ create table if not exists users (
     password text not null,
     role text not null check (role in ('admin', 'scorer')),
     status text not null default 'enabled' check (status in ('enabled', 'disabled')),
-    lastloginat text,
-    createdat text not null,
-    updatedat text not null
+    lastloginat timestamptz,
+    createdat timestamptz not null,
+    updatedat timestamptz not null
   );
 
 create table if not exists user_sessions (
     tokenhash text primary key,
     userid text not null,
-    expiresat text not null,
-    createdat text not null,
-    lastseenat text not null,
+    expiresat timestamptz not null,
+    createdat timestamptz not null,
+    lastseenat timestamptz not null,
     foreign key (userid) references users(id) on delete cascade
   );
 
@@ -31,15 +31,15 @@ create table if not exists import_jobs (
     progress integer not null default 0,
     message text,
     resultjson text,
-    createdat text not null,
-    updatedat text not null,
-    expiresat text not null
+    createdat timestamptz not null,
+    updatedat timestamptz not null,
+    expiresat timestamptz not null
   );
 
 create table if not exists schema_meta (
     key text primary key,
     value text not null,
-    updatedat text not null
+    updatedat timestamptz not null
   );
 
 create table if not exists subjects (
@@ -53,9 +53,9 @@ create table if not exists subjects (
     categorycount integer not null default 0,
     status text not null default 'importing' check (status in ('importing', 'imported', 'failed')),
     taskstatus text not null default 'task_pending' check (taskstatus in ('task_pending', 'scoring', 'task_completed')),
-    deletionrequestedat text,
-    createdat text not null,
-    updatedat text not null
+    deletionrequestedat timestamptz,
+    createdat timestamptz not null,
+    updatedat timestamptz not null
   );
 
 create table if not exists projects (
@@ -64,16 +64,16 @@ create table if not exists projects (
     icon text not null default 'archive',
     packageid text not null,
     taskstatus text not null default 'task_pending' check (taskstatus in ('task_pending', 'scoring', 'task_completed')),
-    deletionrequestedat text,
-    createdat text not null,
-    updatedat text not null,
+    deletionrequestedat timestamptz,
+    createdat timestamptz not null,
+    updatedat timestamptz not null,
     foreign key (packageid) references subjects(id) on delete restrict
   );
 
 create table if not exists project_packages (
     projectid text not null,
     packageid text not null,
-    createdat text not null,
+    createdat timestamptz not null,
     primary key (projectid, packageid),
     foreign key (projectid) references projects(id) on delete cascade,
     foreign key (packageid) references subjects(id) on delete restrict
@@ -83,14 +83,14 @@ create table if not exists teams (
     id text primary key,
     name text not null unique ,
     status text not null default 'enabled' check (status in ('enabled', 'disabled')),
-    createdat text not null,
-    updatedat text not null
+    createdat timestamptz not null,
+    updatedat timestamptz not null
   );
 
 create table if not exists user_teams (
     userid text not null,
     teamid text not null,
-    createdat text not null,
+    createdat timestamptz not null,
     primary key (userid, teamid),
     foreign key (userid) references users(id) on delete cascade,
     foreign key (teamid) references teams(id) on delete cascade
@@ -99,7 +99,7 @@ create table if not exists user_teams (
 create table if not exists project_teams (
     projectid text not null,
     teamid text not null,
-    createdat text not null,
+    createdat timestamptz not null,
     primary key (projectid, teamid),
     foreign key (projectid) references projects(id) on delete cascade,
     foreign key (teamid) references teams(id) on delete restrict
@@ -108,7 +108,7 @@ create table if not exists project_teams (
 create table if not exists user_projects (
     userid text not null,
     projectid text not null,
-    createdat text not null,
+    createdat timestamptz not null,
     primary key (userid, projectid),
     foreign key (userid) references users(id) on delete cascade,
     foreign key (projectid) references subjects(id) on delete cascade
@@ -151,9 +151,9 @@ create table if not exists images (
     typography integer,
     typographystate text not null default 'unrated',
     comment text,
-    ratedat text,
-    createdat text not null,
-    updatedat text not null,
+    ratedat timestamptz,
+    createdat timestamptz not null,
+    updatedat timestamptz not null,
     foreign key (subjectid) references subjects(id) on delete cascade,
     unique (subjectid, originalpath)
   );
@@ -174,17 +174,17 @@ create table if not exists rating_tasks (
     assignmentkey integer not null default 0,
     submissionmode text check (submissionmode in ('direct', 'ranked')),
     rankingactioncount integer not null default 0,
-    startedat text,
-    completedat text,
+    startedat timestamptz,
+    completedat timestamptz,
     durationms integer,
-    editedat text,
+    editedat timestamptz,
     editcount integer not null default 0,
     rollbackcount integer not null default 0,
-    lastrolledbackat text,
+    lastrolledbackat timestamptz,
     lastrolledbackby text,
     imagekey text not null,
-    createdat text not null,
-    updatedat text not null,
+    createdat timestamptz not null,
+    updatedat timestamptz not null,
     foreign key (subjectid) references subjects(id) on delete cascade,
     unique (subjectid, taskversion, round, tasktype, imagekey)
   );
@@ -206,7 +206,7 @@ create table if not exists project_task_stats (
     pending integer not null default 0,
     assigned integer not null default 0,
     completed integer not null default 0,
-    updatedat text not null,
+    updatedat timestamptz not null,
     primary key (projectid, taskversion),
     foreign key (projectid) references projects(id) on delete cascade
   );
@@ -217,7 +217,7 @@ create table if not exists scorer_task_stats (
     projectid text not null,
     assigned integer not null default 0,
     completed integer not null default 0,
-    updatedat text not null,
+    updatedat timestamptz not null,
     primary key (scorer, taskversion, projectid)
   );
 
@@ -229,7 +229,7 @@ create table if not exists subject_task_templates (
     criterion text not null,
     imagekey text not null,
     selectionkey integer not null default 0,
-    createdat text not null,
+    createdat timestamptz not null,
     foreign key (subjectid) references subjects(id) on delete cascade,
     unique (subjectid, sourcetaskid),
     unique (subjectid, round, criterion, imagekey)
@@ -250,7 +250,7 @@ create table if not exists image_pair_edges (
     imagea text not null,
     imageb text not null,
     count integer not null default 0,
-    updatedat text not null,
+    updatedat timestamptz not null,
     primary key (subjectid, imagea, imageb),
     foreign key (subjectid) references subjects(id) on delete cascade,
     foreign key (imagea) references images(id) on delete cascade,
@@ -265,11 +265,11 @@ create table if not exists feedbacks (
     imagepaths text not null default '[]',
     status text not null default 'pending' check (status in ('pending', 'processing', 'resolved')),
     submitter text not null,
-    submittedat text not null,
+    submittedat timestamptz not null,
     reply text,
     repliedby text,
-    repliedat text,
-    updatedat text not null
+    repliedat timestamptz,
+    updatedat timestamptz not null
   );
 
 create table if not exists feedback_messages (
@@ -278,7 +278,7 @@ create table if not exists feedback_messages (
     author text not null,
     authorrole text not null check (authorrole in ('admin', 'scorer')),
     content text not null,
-    createdat text not null,
+    createdat timestamptz not null,
     foreign key (feedbackid) references feedbacks(id) on delete cascade
   );
 create index if not exists idx_subjects_createdat on subjects(createdat desc);

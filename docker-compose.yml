@@ -4,7 +4,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-image_rating}
-      POSTGRES_USER: ${POSTGRES_USER:-image_rating}
+      # The official image creates POSTGRES_USER as a superuser on init.
+      POSTGRES_USER: image_rating
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
       - ${RATING_DATA_DIR:-/data/sunwenxiu/rating}/postgres:/var/lib/postgresql/data
@@ -21,7 +22,7 @@ services:
     restart: unless-stopped
     environment:
       PORT: ${PORT:-3000}
-      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-image_rating}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-image_rating}}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://image_rating:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-image_rating}}
       UPLOAD_DIR: /app/uploads
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       CORS_ORIGIN: ${CORS_ORIGIN:-}

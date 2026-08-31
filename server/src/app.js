@@ -2176,6 +2176,7 @@ async function runChunkedImportJob(job) {
   }
 }
 
+// 时间统一存储为 UTC；业务展示和按小时统计固定使用 Asia/Shanghai（UTC+8）。
 function nowIso() {
   return new Date().toISOString();
 }

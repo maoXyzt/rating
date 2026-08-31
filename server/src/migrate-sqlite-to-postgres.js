@@ -10,18 +10,88 @@ if (!connectionString) throw new Error("DATABASE_URL is required");
 
 const sqlite = new DatabaseSync(sqlitePath, { readOnly: true });
 const client = new Client({ connectionString });
+const migrationOrder = [
+  "users",
+  "import_jobs",
+  "schema_meta",
+  "subjects",
+  "teams",
+  "projects",
+  "user_sessions",
+  "project_packages",
+  "user_teams",
+  "project_teams",
+  "user_projects",
+  "images",
+  "project_task_stats",
+  "scorer_task_stats",
+  "rating_tasks",
+  "subject_task_templates",
+  "rating_task_items",
+  "subject_task_template_items",
+  "image_pair_edges",
+  "feedbacks",
+  "feedback_messages",
+];
+const timestampColumns = new Set([
+  "createdat",
+  "updatedat",
+  "lastloginat",
+  "expiresat",
+  "lastseenat",
+  "deletionrequestedat",
+  "ratedat",
+  "startedat",
+  "completedat",
+  "editedat",
+  "lastrolledbackat",
+  "submittedat",
+  "repliedat",
+]);
 
 function quoteIdentifier(value) {
   return `"${String(value).toLowerCase().replaceAll('"', '""')}"`;
 }
 
 function sqliteTables() {
-  return sqlite
+  const tables = sqlite
     .prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )
     .all()
     .map((row) => row.name);
+  return [
+    ...migrationOrder.filter((table) => tables.includes(table)),
+    ...tables.filter((table) => !migrationOrder.includes(table)),
+  ];
+}
+
+function migrateValue(table, column, value) {
+  if (!timestampColumns.has(String(column).toLowerCase())) return value;
+  if (value == null || value === "") return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`Invalid timestamp in ${table}.${column}: ${value}`);
+  }
+  return date;
+}
+
+async function ensureNativeTimestampColumns() {
+  const result = await client.query(
+    `SELECT table_name, column_name
+     FROM information_schema.columns
+     WHERE table_schema = current_schema()
+       AND column_name = ANY($1::text[])
+       AND data_type <> 'timestamp with time zone'`,
+    [[...timestampColumns]],
+  );
+  for (const { table_name: table, column_name: column } of result.rows) {
+    await client.query(
+      `ALTER TABLE ${quoteIdentifier(table)}
+       ALTER COLUMN ${quoteIdentifier(column)} TYPE timestamptz
+       USING NULLIF(BTRIM(${quoteIdentifier(column)}::text), '')::timestamptz`,
+    );
+  }
 }
 
 async function migrateTable(table) {
@@ -33,30 +103,33 @@ async function migrateTable(table) {
   if (!rows.length) return { table, rows: 0 };
 
   const names = columns.map(quoteIdentifier).join(", ");
+  let migratedRows = 0;
   for (const row of rows) {
-    const values = columns.map((column) => row[column]);
+    const values = columns.map((column) => migrateValue(table, column, row[column]));
     const placeholders = values.map((_, index) => `$${index + 1}`).join(", ");
-    await client.query(
-      `INSERT INTO ${quoteIdentifier(table)} (${names}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`,
+    const result = await client.query(
+      `INSERT INTO ${quoteIdentifier(table)} (${names}) VALUES (${placeholders})`,
       values,
     );
+    if (result.rowCount !== 1) throw new Error(`Failed to migrate ${table} row`);
+    migratedRows += 1;
   }
-  return { table, rows: rows.length };
+  return { table, rows: migratedRows };
 }
 
 await client.connect();
 try {
+  await client.query("BEGIN");
   // Rebuild the indexes whose PostgreSQL ordering differs from SQLite.
   await client.query("DROP INDEX IF EXISTS idx_rating_tasks_project, idx_rating_tasks_export");
   const schemaPath = new URL("./postgres-schema.sql", import.meta.url);
   await client.query(await fs.readFile(schemaPath, "utf8"));
-  await client.query("BEGIN");
-  await client.query("SET CONSTRAINTS ALL DEFERRED").catch(() => {});
-  await client.query("SET session_replication_role = replica");
+  await ensureNativeTimestampColumns();
+  await client.query("ALTER TABLE rating_tasks DISABLE TRIGGER trg_rating_tasks_stats");
   const results = [];
   for (const table of sqliteTables()) results.push(await migrateTable(table));
+  await client.query("ALTER TABLE rating_tasks ENABLE TRIGGER trg_rating_tasks_stats");
   await client.query("COMMIT");
-  await client.query("SET session_replication_role = origin");
   await client.query("ANALYZE");
   for (const result of results) console.log(`${result.table}: ${result.rows}`);
 } catch (error) {
