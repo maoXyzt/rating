@@ -45,7 +45,7 @@ const camelNames = new Map();
 for (const file of ["app.js", "services/admin-dashboard.js", "services/admin-scoring.js"]) {
   try {
     const source = await fs.readFile(new URL(`./${file}`, import.meta.url), "utf8");
-    for (const match of source.matchAll(/\b[A-Za-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*\b/g)) {
+    for (const match of source.matchAll(/\b[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*\b/g)) {
       camelNames.set(match[0].toLowerCase(), match[0]);
     }
   } catch {}

@@ -627,7 +627,7 @@ const selectAssignedTaskRowsPageStmt = db.prepare(`
   WHERE rating_tasks.taskVersion = ?
     AND rating_tasks.scorer = ?
     AND rating_tasks.status = 'assigned'
-    AND (? IS NULL OR rating_tasks.projectId = ?)
+    AND (?::text IS NULL OR rating_tasks.projectId = ?)
   ORDER BY rating_tasks.updatedAt DESC, rating_tasks.id ASC
   LIMIT ? OFFSET ?
 `);
@@ -637,7 +637,7 @@ const selectAssignedTaskCountStmt = db.prepare(`
   WHERE taskVersion = ?
     AND scorer = ?
     AND status = 'assigned'
-    AND (? IS NULL OR projectId = ?)
+    AND (?::text IS NULL OR projectId = ?)
 `);
 const selectScorerTaskStatsStmt = db.prepare(`
   SELECT
@@ -646,7 +646,7 @@ const selectScorerTaskStatsStmt = db.prepare(`
   FROM scorer_task_stats
   WHERE taskVersion = ?
     AND scorer = ?
-    AND (? IS NULL OR projectId = ?)
+    AND (?::text IS NULL OR projectId = ?)
 `);
 const selectScorerProjectCountStmt = db.prepare(`
   SELECT COUNT(*) AS total
