@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { databasePath } from "./database-path.js";
 
 export const scoreNumericFields = [
   "overall",
@@ -55,20 +55,9 @@ export const imageSelectColumns = `id AS _id, subjectId, filename, originalPath,
 export const userSelectColumns =
   "id, username, role, status, lastLoginAt, createdAt, updatedAt";
 
-const serverDir = path.dirname(fileURLToPath(import.meta.url));
-const defaultDbPath = path.resolve(
-  serverDir,
-  "..",
-  "data",
-  "image-rating.sqlite",
-);
-const configuredDbPath = process.env.DB_PATH
-  ? path.resolve(process.env.DB_PATH)
-  : defaultDbPath;
+await fs.mkdir(path.dirname(databasePath), { recursive: true });
 
-await fs.mkdir(path.dirname(configuredDbPath), { recursive: true });
-
-export const db = new DatabaseSync(configuredDbPath);
+export const db = new DatabaseSync(databasePath);
 
 db.exec("PRAGMA busy_timeout = 30000;");
 

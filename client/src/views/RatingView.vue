@@ -3,13 +3,17 @@ import { computed, h, onMounted, reactive, ref, watch } from 'vue';
 import { NButton, NTag, useMessage, type DataTableColumns } from 'naive-ui';
 import { currentUser } from '../composables/auth';
 import TaskRankingDialog from '../features/tasks/components/TaskRankingDialog.vue';
+import AsyncStatePlaceholder from '../components/AsyncStatePlaceholder.vue';
 import { taskCriteria } from '../constants/scoreCriteria';
 import { imageApi } from '../services/images';
-import type { ProjectItem, RatingTask, ScorerDashboard, ScorerTaskListItem } from '../types/image';
+import { isQueryUnavailable } from '../services/http';
+import type { RatingTask, ScorerDashboard, ScorerProjectOption, ScorerTaskListItem } from '../types/image';
 
 const message = useMessage();
 const tasks = ref<ScorerTaskListItem[]>([]);
 const loading = ref(false);
+const taskListState = ref<'loading' | 'ready' | 'stale' | 'unavailable'>('loading');
+const taskStatsState = ref<'loading' | 'ready' | 'stale' | 'unavailable'>('loading');
 const taskTotal = ref(0);
 const taskPage = ref(1);
 const taskPageSize = ref(10);
@@ -18,7 +22,7 @@ const taskCursors = ref<Record<number, string | null>>({ 1: null });
 const activeTask = ref<RatingTask | null>(null);
 const rankingVisible = ref(false);
 const openingTaskId = ref<string | null>(null);
-const projects = ref<ProjectItem[]>([]);
+const projects = ref<ScorerProjectOption[]>([]);
 const taskStats = ref<Pick<ScorerDashboard, 'pendingTasks' | 'completedTasks' | 'totalTasks' | 'projectCount'>>({
   pendingTasks: 0,
   completedTasks: 0,
@@ -39,6 +43,10 @@ const taskProgress = computed(() => {
   return total ? Math.round((taskStats.value.completedTasks / total) * 100) : 0;
 });
 const taskProgressTotal = computed(() => taskStats.value.totalTasks);
+const taskProgressLabel = computed(() => taskStatsState.value === 'unavailable' ? '—' : `${taskProgress.value}%`);
+const taskProgressDetail = computed(() => taskStatsState.value === 'unavailable'
+  ? '统计暂不可用'
+  : `${taskStats.value.completedTasks} / ${taskProgressTotal.value} 已完成`);
 
 const statIconPaths = {
   task: 'M7 7h10M7 12h10M7 17h7 M5 5h14v14H5z',
@@ -73,6 +81,7 @@ async function loadTasks(page = taskPage.value, pageSize = taskPageSize.value) {
   const scorer = currentUser.value?.username;
   if (!scorer) return;
   loading.value = true;
+  taskListState.value = tasks.value.length ? 'stale' : 'loading';
   try {
     if (page === 1) taskCursors.value = { 1: null };
     const result = await imageApi.assignedTasks({
@@ -88,8 +97,13 @@ async function loadTasks(page = taskPage.value, pageSize = taskPageSize.value) {
     if (result.nextCursor) taskCursors.value[page + 1] = result.nextCursor;
     taskPage.value = result.page;
     taskPageSize.value = result.pageSize;
+    taskListState.value = 'ready';
   } catch (error) {
-    message.error(errorMessage(error));
+    if (isQueryUnavailable(error)) taskListState.value = tasks.value.length ? 'stale' : 'unavailable';
+    else {
+      taskListState.value = tasks.value.length ? 'stale' : 'ready';
+      message.error(errorMessage(error));
+    }
   } finally {
     loading.value = false;
   }
@@ -97,15 +111,17 @@ async function loadTasks(page = taskPage.value, pageSize = taskPageSize.value) {
 
 async function loadProjects() {
   try {
-    projects.value = await imageApi.projects();
+    const result = await imageApi.assignedTaskOptions();
+    projects.value = result.projects;
   } catch (error) {
-    message.error(errorMessage(error));
+    if (!isQueryUnavailable(error)) message.error(errorMessage(error));
   }
 }
 
 async function loadTaskStats() {
   const scorer = currentUser.value?.username;
   if (!scorer) return;
+  taskStatsState.value = taskStats.value.totalTasks ? 'stale' : 'loading';
   try {
     const result = await imageApi.scorerDashboard({
       scorer,
@@ -117,8 +133,13 @@ async function loadTaskStats() {
       totalTasks: result.totalTasks,
       projectCount: result.projectCount
     };
+    taskStatsState.value = 'ready';
   } catch (error) {
-    message.error(errorMessage(error));
+    if (isQueryUnavailable(error)) taskStatsState.value = taskStats.value.totalTasks ? 'stale' : 'unavailable';
+    else {
+      taskStatsState.value = taskStats.value.totalTasks ? 'stale' : 'ready';
+      message.error(errorMessage(error));
+    }
   }
 }
 
@@ -160,22 +181,29 @@ async function getNextTask() {
   const scorer = currentUser.value?.username;
   if (!scorer) throw new Error('未获取到当前打分人');
 
-  const [nextPage] = await Promise.all([
-    imageApi.assignedTasks({
-      scorer,
-      projectId: taskFilters.projectId,
-      criterion: taskFilters.criterion,
-      status: 'assigned',
-      page: 1,
-      pageSize: 1
-    }),
+  const nextPage = await imageApi.assignedTasks({
+    scorer,
+    projectId: taskFilters.projectId,
+    criterion: taskFilters.criterion,
+    status: 'assigned',
+    page: 1,
+    pageSize: 1,
+    summaryOnly: true
+  });
+
+  const nextTask = nextPage.tasks[0];
+  if (!nextTask) {
+    await Promise.all([
+      loadTasks(taskPage.value, taskPageSize.value),
+      loadTaskStats()
+    ]);
+    return null;
+  }
+  const result = await imageApi.assignedTaskDetail(nextTask.id);
+  void Promise.all([
     loadTasks(taskPage.value, taskPageSize.value),
     loadTaskStats()
   ]);
-
-  const nextTask = nextPage.tasks[0];
-  if (!nextTask) return null;
-  const result = await imageApi.assignedTaskDetail(nextTask.id);
   return result.task;
 }
 
@@ -232,7 +260,7 @@ watch(taskFilters, () => void loadTasks(1, taskPageSize.value), { deep: true });
 onMounted(() => {
   void loadProjects();
   void loadTasks();
-  void loadTaskStats();
+  window.setTimeout(() => void loadTaskStats(), 200);
 });
 </script>
 
@@ -250,7 +278,7 @@ onMounted(() => {
           </div>
           <div class="admin-dashboard-stat-copy">
             <span>未完成任务</span>
-            <strong>{{ taskStats.pendingTasks }}</strong>
+            <strong>{{ taskStatsState === 'unavailable' ? '—' : taskStats.pendingTasks }}</strong>
             <n-text depth="3">点击筛选待处理</n-text>
           </div>
         </article>
@@ -266,7 +294,7 @@ onMounted(() => {
           </div>
           <div class="admin-dashboard-stat-copy">
             <span>已完成任务</span>
-            <strong>{{ taskStats.completedTasks }}</strong>
+            <strong>{{ taskStatsState === 'unavailable' ? '—' : taskStats.completedTasks }}</strong>
             <n-text depth="3">点击筛选已完成</n-text>
           </div>
         </article>
@@ -282,8 +310,9 @@ onMounted(() => {
             </div>
             <div class="admin-dashboard-stat-copy">
               <span>任务进度</span>
-              <strong>{{ taskProgress }}%</strong>
-              <n-text depth="3">{{ taskStats.completedTasks }} / {{ taskProgressTotal }} 已完成</n-text>
+              <strong>{{ taskProgressLabel }}</strong>
+              <n-text depth="3">{{ taskProgressDetail }}</n-text>
+              <n-text v-if="taskStatsState === 'stale'" depth="3">统计正在刷新</n-text>
             </div>
           </div>
           <n-progress class="scorer-task-composite-progress" type="line" :percentage="taskProgress"
@@ -299,9 +328,17 @@ onMounted(() => {
         <n-button secondary @click="resetTaskFilters">重置筛选</n-button>
       </div>
       <div class="scorer-task-table-body">
-        <n-data-table v-if="tasks.length" :columns="columns" :data="tasks" :loading="loading" :bordered="false" remote
+        <AsyncStatePlaceholder v-if="taskListState === 'unavailable'" state="unavailable" title="任务列表暂时不可用"
+          description="任务数据正在恢复，稍后重试即可继续工作。" :retrying="loading" @retry="() => void loadTasks()" />
+        <template v-else-if="tasks.length">
+          <AsyncStatePlaceholder v-if="taskListState === 'stale'" state="stale" title="任务列表正在刷新"
+            description="先显示上次结果，刷新完成后会自动更新。" :retrying="loading" @retry="() => void loadTasks()" />
+          <n-data-table :columns="columns" :data="tasks" :loading="loading" :bordered="false" remote
           :scroll-x="1080" />
-        <div v-else class="empty">{{ loading ? '正在加载任务...' : '暂无任务' }}</div>
+        </template>
+        <AsyncStatePlaceholder v-else-if="taskListState === 'loading'" state="loading" title="正在加载任务"
+          description="正在准备你的任务列表。" />
+        <div v-else class="empty">暂无任务</div>
       </div>
       <div class="scorer-task-table-footer">
         <n-pagination v-if="taskHasMore || taskPage > 1" :page="taskPage" :page-size="taskPageSize"

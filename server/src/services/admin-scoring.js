@@ -151,6 +151,7 @@ export function createAdminScoringService({
   nowIso,
   parseProjectId,
   parseTaskPagination,
+  onTasksChanged,
 }) {
   const rollbackJobs = new Map();
   const activeRollbackJobsByKey = new Map();
@@ -299,6 +300,8 @@ export function createAdminScoringService({
       scorer: query.scorer || null,
       projectId: query.projectId || null,
       submissionMode: query.submissionMode || null,
+      minDurationSeconds: query.minDurationSeconds || null,
+      maxDurationSeconds: query.maxDurationSeconds || null,
     });
     const cached = summaryCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
@@ -507,6 +510,7 @@ export function createAdminScoringService({
     }
 
     if (!changed) throw httpError(409, "任务状态已变化，请重新预览后再回退");
+    onTasksChanged?.();
     return {
       ...rollbackPreviewDto(analysis),
       rolledBackTaskCount: changed,

@@ -3,10 +3,13 @@ import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { NButton, NImage, NTag, useMessage, type DataTableColumns, type UploadFileInfo } from 'naive-ui';
 import { currentUser } from '../composables/auth';
 import { imageApi } from '../services/images';
+import { isQueryUnavailable } from '../services/http';
+import AsyncStatePlaceholder from '../components/AsyncStatePlaceholder.vue';
 import type { FeedbackItem, FeedbackStatus, FeedbackType } from '../types/image';
 
 const message = useMessage();
 const loading = ref(false);
+const feedbackListState = ref<'loading' | 'ready' | 'stale' | 'unavailable'>('loading');
 const submitting = ref(false);
 const feedbacks = ref<FeedbackItem[]>([]);
 const total = ref(0);
@@ -79,14 +82,20 @@ function paginationPrefix({ itemCount }: { itemCount?: number }) {
 
 async function loadFeedbacks(nextPage = page.value, nextPageSize = pageSize.value) {
   loading.value = true;
+  feedbackListState.value = feedbacks.value.length ? 'stale' : 'loading';
   try {
     const result = await imageApi.feedbacks({ page: nextPage, pageSize: nextPageSize, status: status.value });
     feedbacks.value = result.items;
     total.value = result.total;
     page.value = result.page;
     pageSize.value = result.pageSize;
+    feedbackListState.value = 'ready';
   } catch (error) {
-    message.error(errorMessage(error));
+    if (isQueryUnavailable(error)) feedbackListState.value = feedbacks.value.length ? 'stale' : 'unavailable';
+    else {
+      feedbackListState.value = feedbacks.value.length ? 'stale' : 'ready';
+      message.error(errorMessage(error));
+    }
   } finally {
     loading.value = false;
   }
@@ -220,9 +229,16 @@ onBeforeUnmount(() => {
 
       </div>
       <div class="feedback-table-body">
-        <n-data-table v-if="feedbacks.length" :columns="columns" :data="feedbacks" :loading="loading" :bordered="false"
-          remote :scroll-x="1120" />
-        <div v-else class="empty">{{ loading ? '正在加载反馈...' : '暂无问题反馈' }}</div>
+        <AsyncStatePlaceholder v-if="feedbackListState === 'unavailable'" state="unavailable" title="反馈列表暂时不可用"
+          description="暂时无法加载反馈记录，稍后重试即可。" :retrying="loading" @retry="() => void loadFeedbacks()" />
+        <template v-else-if="feedbacks.length">
+          <AsyncStatePlaceholder v-if="feedbackListState === 'stale'" state="stale" title="反馈列表正在刷新"
+            description="先显示上次结果，刷新完成后会自动更新。" :retrying="loading" @retry="() => void loadFeedbacks()" />
+          <n-data-table :columns="columns" :data="feedbacks" :loading="loading" :bordered="false" remote :scroll-x="1120" />
+        </template>
+        <AsyncStatePlaceholder v-else-if="feedbackListState === 'loading'" state="loading" title="正在加载反馈"
+          description="正在准备反馈记录。" />
+        <div v-else class="empty">暂无问题反馈</div>
       </div>
       <div class="feedback-table-footer">
         <n-pagination v-if="total" :page="page" :page-size="pageSize" :item-count="total" show-size-picker

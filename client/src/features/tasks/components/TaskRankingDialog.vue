@@ -4,6 +4,8 @@ import { NImagePreview, useDialog, useMessage } from 'naive-ui';
 import { currentUser } from '../../../composables/auth';
 import { taskCriteria, type TaskCriterionKey } from '../../../constants/scoreCriteria';
 import { imageApi } from '../../../services/images';
+import { isQueryUnavailable } from '../../../services/http';
+import AsyncStatePlaceholder from '../../../components/AsyncStatePlaceholder.vue';
 import type { RankingRelation, RatingTask, RatingTaskItem, TaskSubmissionMode } from '../../../types/image';
 
 const props = defineProps<{
@@ -20,6 +22,10 @@ const RAPID_SUBMISSION_INTERVAL_MS = 3000;
 const message = useMessage();
 const dialog = useDialog();
 const saving = ref(false);
+const submitError = ref(false);
+const nextTaskError = ref(false);
+const nextTaskRetrying = ref(false);
+const lastSavedTask = ref<RatingTask | null>(null);
 const lastSubmissionAt = ref<number | null>(null);
 const orderedItems = ref<RatingTaskItem[]>([]);
 const excludedImageIds = ref<string[]>([]);
@@ -122,6 +128,9 @@ const rulePoints: Record<string, string[]> = {
 const currentRulePoints = computed(() => criterion.value ? rulePoints[criterion.value] : rulePoints.overall);
 
 function resetOrder() {
+  submitError.value = false;
+  nextTaskError.value = false;
+  lastSavedTask.value = null;
   const task = props.task;
   if (!task) {
     orderedItems.value = [];
@@ -325,6 +334,8 @@ async function submit(advance = false) {
   }
 
   saving.value = true;
+  submitError.value = false;
+  nextTaskError.value = false;
   try {
     const submissionMode: TaskSubmissionMode = rankingActionCount.value > 0 ? 'ranked' : 'direct';
     const trackingPayload = { submissionMode, rankingActionCount: rankingActionCount.value };
@@ -342,6 +353,7 @@ async function submit(advance = false) {
       ? await imageApi.updateCompletedTask(task.id, payload)
       : await imageApi.completeTask(task.id, payload);
     lastSubmissionAt.value = Date.now();
+    lastSavedTask.value = result.task;
     emit('saved', result.task, advance);
 
     if (advance) {
@@ -358,7 +370,8 @@ async function submit(advance = false) {
         visible.value = false;
         return;
       } catch (error) {
-        message.error(error instanceof Error ? `当前任务已提交，${error.message}` : '当前任务已提交，但加载下一条失败');
+        if (isQueryUnavailable(error)) nextTaskError.value = true;
+        else message.error(error instanceof Error ? `当前任务已提交，${error.message}` : '当前任务已提交，但加载下一条失败');
         return;
       }
     }
@@ -366,9 +379,30 @@ async function submit(advance = false) {
     message.success(isEditing.value ? '修改已保存' : '任务已提交');
     visible.value = false;
   } catch (error) {
-    message.error(error instanceof Error ? error.message : '提交失败');
+    if (isQueryUnavailable(error)) submitError.value = true;
+    else message.error(error instanceof Error ? error.message : '提交失败');
   } finally {
     saving.value = false;
+  }
+}
+
+async function retryNextTask() {
+  const task = lastSavedTask.value;
+  if (!task || !props.getNextTask || nextTaskRetrying.value) return;
+  nextTaskRetrying.value = true;
+  try {
+    const nextTask = await props.getNextTask(task);
+    if (nextTask) {
+      nextTaskError.value = false;
+      emit('next', nextTask);
+      return;
+    }
+    nextTaskError.value = false;
+    visible.value = false;
+  } catch (error) {
+    if (!isQueryUnavailable(error)) message.error(error instanceof Error ? error.message : '加载下一条失败');
+  } finally {
+    nextTaskRetrying.value = false;
   }
 }
 </script>
@@ -489,10 +523,15 @@ async function submit(advance = false) {
 
       </section>
 
+      <AsyncStatePlaceholder v-if="nextTaskError" state="unavailable" title="下一条任务暂时无法加载"
+        description="当前任务已提交，稍后重试即可继续。" :retrying="nextTaskRetrying" @retry="retryNextTask" />
+
     </div>
 
     <template #footer>
       <div class="task-ranking-actions" style="padding-right:20px">
+        <AsyncStatePlaceholder v-if="submitError" state="unavailable" title="提交暂时未完成"
+          description="评分内容仍在当前页面，稍后重试即可。" retry-label="重新提交" @retry="() => void submit()" />
         <n-button @click="visible = false" size="large" style="font-size:20px;margin-right:10px">取消</n-button>
         <n-button type="primary" :loading="saving" :disabled="!rankingComplete" @click="submit" size="large"
           style="font-size:20px">{{ isEditing

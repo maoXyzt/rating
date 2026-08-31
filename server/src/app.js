@@ -31,12 +31,15 @@ import {
 } from "./sqlite.js";
 import { createAdminDashboardService } from "./services/admin-dashboard.js";
 import { createAdminScoringService } from "./services/admin-scoring.js";
+import { createQueryWorkerPool } from "./query-worker-pool.js";
 
 const app = express();
 const taskImageSelectColumns =
   "id AS _id, subjectId, filename, originalPath, storagePath, thumbnailPath, category, directory, isInfographic, prompt";
 const taskListImageSelectColumns =
   "id AS _id, filename, storagePath, thumbnailPath";
+const imageListSelectColumns =
+  "id AS _id, subjectId, filename, storagePath, thumbnailPath, category, directory, isInfographic";
 const uploadDir = path.resolve(process.env.UPLOAD_DIR || "uploads");
 const zipUploadDir = path.join(uploadDir, "_zips");
 const chunkUploadDir = path.join(uploadDir, "_chunks");
@@ -594,6 +597,18 @@ const taskCriterionLabels = {
   designQuality: "整体设计感",
   typography: "文字设计感",
 };
+
+let queryWorkerPool;
+
+function getQueryWorkerPool() {
+  return (queryWorkerPool ||= createQueryWorkerPool({
+    taskVersion,
+    taskCriteria,
+    scoreNumericFields,
+    skippableScoreFields,
+    imageSelectColumns,
+  }));
+}
 const selectTaskRowsPageStmt = db.prepare(`
   SELECT id, subjectId, projectId, taskVersion, taskType, status, scorer, ranking, excludedImageIds, correctImageIds, rankingRelations,
          submissionMode, rankingActionCount, startedAt, completedAt, durationMs, editedAt, editCount,
@@ -2251,7 +2266,7 @@ function parseFeedbackImagePaths(value) {
   }
 }
 
-function feedbackDto(row) {
+function feedbackDto(row, messages = null) {
   if (!row) return null;
   const imagePaths = parseFeedbackImagePaths(row.imagePaths);
   return {
@@ -2266,7 +2281,7 @@ function feedbackDto(row) {
     repliedBy: row.repliedBy ?? null,
     repliedAt: row.repliedAt ?? null,
     updatedAt: row.updatedAt,
-    messages: selectFeedbackMessagesStmt.all(row.id).map((message) => ({
+    messages: (messages ?? selectFeedbackMessagesStmt.all(row.id)).map((message) => ({
       id: message.id,
       author: message.author,
       authorRole: message.authorRole,
@@ -2278,6 +2293,25 @@ function feedbackDto(row) {
       url: `/files/${imagePath}`,
     })),
   };
+}
+
+function feedbackMessagesByIds(ids) {
+  if (!ids.length) return new Map();
+  const rows = db
+    .prepare(`
+      SELECT id, feedbackId, author, authorRole, content, createdAt
+      FROM feedback_messages
+      WHERE feedbackId IN (${placeholders(ids.length)})
+      ORDER BY feedbackId ASC, createdAt ASC, id ASC
+    `)
+    .all(...ids);
+  const messagesByFeedbackId = new Map();
+  rows.forEach((message) => {
+    const messages = messagesByFeedbackId.get(message.feedbackId) || [];
+    messages.push(message);
+    messagesByFeedbackId.set(message.feedbackId, messages);
+  });
+  return messagesByFeedbackId;
 }
 
 function listFeedbacks(query = {}) {
@@ -2296,12 +2330,15 @@ function listFeedbacks(query = {}) {
   const total = db
     .prepare(`SELECT COUNT(*) AS total FROM feedbacks${where}`)
     .get(...params).total;
-  const items = db
+  const rows = db
     .prepare(
       `SELECT * FROM feedbacks${where} ORDER BY submittedAt DESC, id DESC LIMIT ? OFFSET ?`,
     )
-    .all(...params, pageSize, (page - 1) * pageSize)
-    .map(feedbackDto);
+    .all(...params, pageSize, (page - 1) * pageSize);
+  const messagesByFeedbackId = feedbackMessagesByIds(rows.map((row) => row.id));
+  const items = rows.map((row) =>
+    feedbackDto(row, messagesByFeedbackId.get(row.id) || []),
+  );
   return { total, page, pageSize, items };
 }
 
@@ -2551,6 +2588,19 @@ function imageDto(row) {
   };
 }
 
+function imageListDto(row) {
+  return {
+    _id: row._id,
+    subjectId: row.subjectId,
+    filename: row.filename,
+    category: row.category,
+    directory: row.directory || "",
+    isInfographic: Boolean(row.isInfographic),
+    imageUrl: imageAssetUrl(row.storagePath),
+    thumbnailUrl: imageAssetUrl(row.thumbnailPath),
+  };
+}
+
 function taskImageDto(row) {
   return {
     _id: row._id,
@@ -2620,6 +2670,37 @@ function getProjectTaskStats(projectId, version = taskVersion) {
 
 function invalidateTaskSummaryCaches(projectId) {
   subjectTaskReportCache.delete(projectId);
+}
+
+const queuedProjectTaskSummaries = new Set();
+const dirtyProjectTaskSummaries = new Set();
+
+function queueProjectTaskSummary(projectId) {
+  if (queuedProjectTaskSummaries.has(projectId)) {
+    dirtyProjectTaskSummaries.add(projectId);
+    return;
+  }
+  queuedProjectTaskSummaries.add(projectId);
+  setImmediate(() => {
+    try {
+      const taskStats = getProjectTaskStats(projectId);
+      if (taskStats.pending + taskStats.assigned !== 0) return;
+      updateSubjectTaskStatusStmt.run({
+        id: projectId,
+        taskStatus: "task_completed",
+        updatedAt: nowIso(),
+      });
+    } catch (error) {
+      // ponytail: eventual-consistency summary update; use a durable job if
+      // recovery after process loss becomes a requirement.
+      console.error("failed to update project task summary", error);
+    } finally {
+      queuedProjectTaskSummaries.delete(projectId);
+      if (dirtyProjectTaskSummaries.delete(projectId)) {
+        queueProjectTaskSummary(projectId);
+      }
+    }
+  });
 }
 
 function projectStatsByIds(projectIds, version = taskVersion) {
@@ -3117,6 +3198,7 @@ function updateProject(id, body = {}) {
     }
     throw error;
   }
+  invalidateScorerQueryCaches();
   return projectDto(selectProjectByIdStmt.get(id));
 }
 
@@ -3157,6 +3239,7 @@ function deleteProject(id) {
     }
     db.exec("COMMIT");
     invalidateTaskSummaryCaches(project._id);
+    invalidateScorerQueryCaches();
     return { deleted: true, deletedTaskCount };
   } catch (error) {
     try {
@@ -3202,6 +3285,7 @@ async function deleteQueuedSubject(subjectId) {
     try {
       deleteQueuedSubjectStmt.run(subjectId);
       db.exec("COMMIT");
+      invalidateScorerQueryCaches();
     } catch (error) {
       try {
         db.exec("ROLLBACK");
@@ -4163,6 +4247,7 @@ const adminScoringService = createAdminScoringService({
   nowIso,
   parseProjectId,
   parseTaskPagination,
+  onTasksChanged: () => invalidateScorerQueryCaches(),
 });
 const {
   listScoringSummary,
@@ -4698,11 +4783,6 @@ function buildScorerTaskFilter(query = {}) {
   return { where: `WHERE ${clauses.join(" AND ")}`, params };
 }
 
-function getScorerTaskOptions(query = {}) {
-  scorerTaskScope(query);
-  return {};
-}
-
 function taskCriterionOrderSql(column) {
   const cases = taskCriteria
     .map((criterion, index) => {
@@ -4713,7 +4793,33 @@ function taskCriterionOrderSql(column) {
   return `CASE ${cases} ELSE ${taskCriteria.length} END`;
 }
 
+const assignedTaskListCache = new Map();
+const assignedTaskListCacheTtlMs = 1000;
+
+function invalidateAssignedTaskListCache() {
+  assignedTaskListCache.clear();
+}
+
+function invalidateScorerQueryCaches() {
+  invalidateAssignedTaskListCache();
+  queryWorkerPool?.invalidate(["assignedTasks", "assignedTaskOptions", "scorerDashboard"]);
+}
+
 function listAssignedTasks(query = {}) {
+  const cacheKey = JSON.stringify({
+    scorer: query.scorer || null,
+    projectId: query.projectId || null,
+    page: query.page || 1,
+    pageSize: query.pageSize || 10,
+    cursor: query.cursor || null,
+    status: query.status || null,
+    criterion: query.criterion || null,
+    summaryOnly: query.summaryOnly || null,
+    includeTotal: includeTaskTotal(query),
+  });
+  const cached = assignedTaskListCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
   const filter = buildScorerTaskFilter(query);
   const { page, pageSize } = parseTaskPagination(query);
   const criterionOrder = taskCriterionOrderSql("rating_tasks.taskType");
@@ -4764,8 +4870,14 @@ function listAssignedTasks(query = {}) {
   const hasMore = rows.length > pageSize;
   const pageRows = rows.slice(0, pageSize);
   const lastRow = pageRows[pageRows.length - 1];
+  const summaryOnly = ["1", "true", "yes"].includes(
+    String(query.summaryOnly ?? "").toLowerCase(),
+  );
+  const hydratedRows = summaryOnly
+    ? pageRows.map((row) => ({ ...row, items: [] }))
+    : hydrateTaskListRows(pageRows);
 
-  return {
+  const value = {
     total,
     page,
     pageSize,
@@ -4773,7 +4885,7 @@ function listAssignedTasks(query = {}) {
     nextCursor: hasMore && lastRow
       ? serializeTaskCursor(lastRow, Number(lastRow.criterionOrder))
       : null,
-    tasks: hydrateTaskListRows(pageRows).map((row) => ({
+    tasks: hydratedRows.map((row) => ({
       id: row.id,
       subjectId: row.projectId || row.subjectId,
       projectId: row.projectId || row.subjectId,
@@ -4783,6 +4895,14 @@ function listAssignedTasks(query = {}) {
       items: row.items,
     })),
   };
+  if (assignedTaskListCache.size >= 256) {
+    assignedTaskListCache.delete(assignedTaskListCache.keys().next().value);
+  }
+  assignedTaskListCache.set(cacheKey, {
+    value,
+    expiresAt: Date.now() + assignedTaskListCacheTtlMs,
+  });
+  return value;
 }
 
 function getTaskDetail(taskId, { projectId = null, scorer = null } = {}) {
@@ -4802,12 +4922,19 @@ function getTaskDetail(taskId, { projectId = null, scorer = null } = {}) {
   return hydrateTaskRows([task])[0];
 }
 
+const scorerDashboardCache = new Map();
+const scorerDashboardCacheTtlMs = 2 * 1000;
+
 function getScorerDashboard(query = {}) {
   const scorer = parseScorerName(query.scorer);
   if (!scorer) throw httpError(400, "缺少打分人");
   const projectId = query.projectId ? parseProjectId(query.projectId) : null;
   if (!selectScorerByUsernameStmt.get(scorer))
     throw httpError(404, "打分账号不存在");
+
+  const cacheKey = `${scorer}:${projectId || "all"}`;
+  const cached = scorerDashboardCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
 
   const stats = selectScorerTaskStatsStmt.get(
     taskVersion,
@@ -4819,13 +4946,18 @@ function getScorerDashboard(query = {}) {
   const completedTasks = Number(stats.completedTasks || 0);
   const totalTasks = pendingTasks + completedTasks;
 
-  return {
+  const value = {
     pendingTasks,
     completedTasks,
     totalTasks,
     projectCount: selectScorerProjectCountStmt.get(taskVersion, scorer).total,
     progress: totalTasks ? Math.round((completedTasks / totalTasks) * 100) : 0,
   };
+  scorerDashboardCache.set(cacheKey, {
+    value,
+    expiresAt: Date.now() + scorerDashboardCacheTtlMs,
+  });
+  return value;
 }
 
 function parseTaskExcludedImageIds(value, taskImageIds, taskType) {
@@ -5017,17 +5149,6 @@ function completeAssignedTask(taskId, body = {}) {
     });
     if (result.changes === 0)
       throw httpError(409, "任务状态已变更，请刷新后重试");
-
-    const taskStats = getProjectTaskStats(projectId);
-    const remaining = taskStats.pending + taskStats.assigned;
-    if (remaining === 0) {
-      updateSubjectTaskStatusStmt.run({
-        id: projectId,
-        taskStatus: "task_completed",
-        updatedAt: completedAt,
-      });
-    }
-
     db.exec("COMMIT");
   } catch (error) {
     try {
@@ -5037,6 +5158,8 @@ function completeAssignedTask(taskId, body = {}) {
   }
 
   invalidateTaskSummaryCaches(projectId);
+  invalidateScorerQueryCaches();
+  queueProjectTaskSummary(projectId);
   const updated = selectTaskByIdStmt.get(task.id);
   return hydrateTaskRows([updated])[0];
 }
@@ -5111,6 +5234,7 @@ function updateCompletedTask(taskId, body = {}) {
   }
 
   invalidateTaskSummaryCaches(task.projectId || task.subjectId);
+  invalidateScorerQueryCaches();
   const updated = selectTaskByIdStmt.get(task.id);
   return hydrateTaskRows([updated])[0];
 }
@@ -5488,6 +5612,7 @@ function reassignSubjectTasks(subjectId, body = {}) {
   }
 
   invalidateTaskSummaryCaches(subjectId);
+  invalidateScorerQueryCaches();
   return {
     reassignedCount: selectedTasks.length,
     remainingTaskCount: availableTaskCount - selectedTasks.length,
@@ -5554,6 +5679,7 @@ async function assignGeneratedTasks(projectId, allocations, onProgress) {
   }
 
   invalidateTaskSummaryCaches(projectId);
+  invalidateScorerQueryCaches();
   return selectedTasks.length;
 }
 
@@ -5581,6 +5707,7 @@ function rollbackGeneratedTasks(projectId, taskIds, previousTaskStatus) {
       taskStatus: previousTaskStatus,
       updatedAt: nowIso(),
     });
+    invalidateScorerQueryCaches();
   } catch (cleanupError) {
     console.error(`Failed to roll back generated tasks for ${projectId}`, cleanupError);
   }
@@ -5714,6 +5841,10 @@ function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
     },
   );
   job.worker = worker;
+  const invalidateGenerationCaches = () => {
+    invalidateTaskSummaryCaches(subjectId);
+    invalidateScorerQueryCaches();
+  };
   worker.on("message", (message) => {
     if (message?.type === "progress") {
       job.status = "running";
@@ -5722,6 +5853,7 @@ function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
       return;
     }
     if (message?.type === "completed") {
+      invalidateGenerationCaches();
       job.result = message.result;
       job.status = "completed";
       job.stage = "任务导入完成";
@@ -5730,6 +5862,7 @@ function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
       return;
     }
     if (message?.type === "failed") {
+      invalidateGenerationCaches();
       job.status = "failed";
       job.stage = "任务导入失败";
       job.message = message.message || "任务导入失败，请重试";
@@ -5738,6 +5871,7 @@ function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
   });
   worker.on("error", (error) => {
     if (["queued", "running"].includes(job.status)) {
+      invalidateGenerationCaches();
       job.status = "failed";
       job.stage = "任务导入失败";
       job.message = error.message || "任务生成进程启动失败";
@@ -5746,6 +5880,7 @@ function startSubjectTaskGeneration(subjectId, assigneesInput = {}) {
   });
   worker.on("exit", (code) => {
     if (["queued", "running"].includes(job.status)) {
+      invalidateGenerationCaches();
       job.status = "failed";
       job.stage = "任务导入失败";
       job.message = `任务生成进程异常退出（code ${code}）`;
@@ -5820,15 +5955,23 @@ function listImages(query) {
   const page = Math.max(Number(query.page) || 1, 1);
   const pageSize = Math.min(Math.max(Number(query.pageSize) || 20, 1), 100);
   const { where, params } = buildImageFilter(query);
-  const total = db
-    .prepare(`SELECT COUNT(*) AS total FROM images${where}`)
-    .get(...params).total;
+  const includeTotal = ["1", "true", "yes"].includes(
+    String(query.includeTotal ?? "").toLowerCase(),
+  );
+  const includeDetails = ["1", "true", "yes"].includes(
+    String(query.includeDetails ?? "").toLowerCase(),
+  );
+  const total = includeTotal
+    ? db.prepare(`SELECT COUNT(*) AS total FROM images${where}`).get(...params).total
+    : null;
+  const selectColumns = includeDetails ? imageSelectColumns : imageListSelectColumns;
+  const toDto = includeDetails ? imageDto : imageListDto;
   const items = db
     .prepare(
-      `SELECT ${imageSelectColumns} FROM images${where} ORDER BY createdAt DESC LIMIT ? OFFSET ?`,
+      `SELECT ${selectColumns} FROM images${where} ORDER BY createdAt DESC LIMIT ? OFFSET ?`,
     )
     .all(...params, pageSize, (page - 1) * pageSize)
-    .map(imageDto);
+    .map(toDto);
 
   return { total, page, pageSize, items };
 }
@@ -6115,7 +6258,9 @@ app.delete("/api/users/scorers/:id", async (req, res, next) => {
 
 app.get("/api/tasks/assigned/options", async (req, res, next) => {
   try {
-    res.json(getScorerTaskOptions({ ...req.query, scorer: req.auth.username }));
+    res.json(await getQueryWorkerPool().run("assignedTaskOptions", {
+      scorer: req.auth.username,
+    }));
   } catch (error) {
     next(error);
   }
@@ -6123,7 +6268,10 @@ app.get("/api/tasks/assigned/options", async (req, res, next) => {
 
 app.get("/api/tasks/assigned", async (req, res, next) => {
   try {
-    res.json(listAssignedTasks({ ...req.query, scorer: req.auth.username }));
+    res.json(await getQueryWorkerPool().run("assignedTasks", {
+      ...req.query,
+      scorer: req.auth.username,
+    }));
   } catch (error) {
     next(error);
   }
@@ -6131,7 +6279,10 @@ app.get("/api/tasks/assigned", async (req, res, next) => {
 
 app.get("/api/scorer/dashboard", async (req, res, next) => {
   try {
-    res.json(getScorerDashboard({ ...req.query, scorer: req.auth.username }));
+    res.json(await getQueryWorkerPool().run("scorerDashboard", {
+      ...req.query,
+      scorer: req.auth.username,
+    }));
   } catch (error) {
     next(error);
   }
@@ -6139,7 +6290,10 @@ app.get("/api/scorer/dashboard", async (req, res, next) => {
 
 app.get("/api/feedbacks", async (req, res, next) => {
   try {
-    res.json(listFeedbacks(req.query));
+    const result = req.auth.role === "admin"
+      ? listFeedbacks(req.query)
+      : await getQueryWorkerPool().run("feedbacks", req.query);
+    res.json(result);
   } catch (error) {
     next(error);
   }
@@ -6196,6 +6350,7 @@ app.put("/api/feedbacks/:id/status", async (req, res, next) => {
 
 app.post(
   "/api/tasks/:id/complete",
+  requireScorer,
   async (req, res, next) => {
     try {
       res.json({
@@ -6208,11 +6363,11 @@ app.post(
       next(error);
     }
   },
-  requireScorer,
 );
 
 app.put(
   "/api/tasks/:id/complete",
+  requireScorer,
   async (req, res, next) => {
     try {
       res.json({
@@ -6225,7 +6380,6 @@ app.put(
       next(error);
     }
   },
-  requireScorer,
 );
 
 app.get("/api/tasks/:id", requireScorer, async (req, res, next) => {
@@ -6326,7 +6480,10 @@ app.get("/api/images", async (req, res, next) => {
       throw httpError(400, "请选择项目");
     if (req.query.subjectId)
       assertSubjectAccess(String(req.query.subjectId), req.auth);
-    res.json(listImages(req.query));
+    const result = req.auth.role === "admin"
+      ? listImages(req.query)
+      : await getQueryWorkerPool().run("images", req.query);
+    res.json(result);
   } catch (error) {
     next(error);
   }
@@ -6940,6 +7097,9 @@ app.use((error, req, res, _next) => {
         : "上传文件数据不完整，请重新上传";
   }
 
+  if (error.retryAfterSeconds != null) {
+    res.setHeader("Retry-After", String(error.retryAfterSeconds));
+  }
   res.status(status).json({ message, code: error.code || "REQUEST_FAILED" });
 });
 
