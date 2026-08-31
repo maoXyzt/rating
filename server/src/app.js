@@ -31,7 +31,6 @@ import {
 } from "./postgres.js";
 import { createAdminDashboardService } from "./services/admin-dashboard.js";
 import { createAdminScoringService } from "./services/admin-scoring.js";
-import { createQueryWorkerPool } from "./query-worker-pool.js";
 
 const app = express();
 const taskImageSelectColumns =
@@ -185,7 +184,7 @@ const subjectTaskReportCache = new Map();
 const subjectTaskReportCacheTtlMs = 15 * 1000;
 const sessionSeenWriteIntervalMs = 5 * 60 * 1000;
 // Keep task generation transactions short so large jobs do not monopolize
-// SQLite's write lock for long stretches.
+// PostgreSQL connections for long stretches.
 const TASK_WRITE_BATCH_SIZE = 100;
 const TASK_ASSIGN_BATCH_SIZE = 100;
 const sessionDurationMs = 7 * 24 * 60 * 60 * 1000;
@@ -603,17 +602,6 @@ const taskCriterionLabels = {
   typography: "文字设计感",
 };
 
-let queryWorkerPool;
-
-function getQueryWorkerPool() {
-  return (queryWorkerPool ||= createQueryWorkerPool({
-    taskVersion,
-    taskCriteria,
-    scoreNumericFields,
-    skippableScoreFields,
-    imageSelectColumns,
-  }));
-}
 const selectTaskRowsPageStmt = db.prepare(`
   SELECT id, subjectId, projectId, taskVersion, taskType, status, scorer, ranking, excludedImageIds, correctImageIds, rankingRelations,
          submissionMode, rankingActionCount, startedAt, completedAt, durationMs, editedAt, editCount,
@@ -1902,7 +1890,7 @@ async function importZipArchive(
 
     // All archive I/O and image validation has completed before this write
     // transaction. Keep read indexes in place so imports do not rebuild the
-    // entire images table while holding SQLite's writer lock.
+    // entire images table while holding a write transaction.
     await db.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
     await insertSubjectStmt.run({
@@ -2382,7 +2370,6 @@ async function createFeedback(user, body = {}, files = []) {
       submittedAt,
       updatedAt: submittedAt,
     });
-    queryWorkerPool?.invalidate(["feedbacks"]);
     return await feedbackDto(await selectFeedbackByIdStmt.get(id));
   } catch (error) {
     await Promise.all(
@@ -2447,7 +2434,6 @@ async function addFeedbackMessage(id, body, user) {
     } catch {}
     throw error;
   }
-  queryWorkerPool?.invalidate(["feedbacks"]);
   return await feedbackDto(await selectFeedbackByIdStmt.get(id));
 }
 
@@ -2465,7 +2451,6 @@ async function updateFeedbackStatus(id, statusValue, user) {
   }
   const updatedAt = nowIso();
   await db.prepare("UPDATE feedbacks SET status = ?, updatedAt = ? WHERE id = ?").run(status, updatedAt, id);
-  queryWorkerPool?.invalidate(["feedbacks"]);
   return await feedbackDto(await selectFeedbackByIdStmt.get(id));
 }
 
@@ -3884,8 +3869,7 @@ async function hydrateSubjectTaskTemplates(templates) {
   if (!templates.length) return [];
 
   const templateIds = templates.map((template) => template.id);
-  // SQLite limits the number of bound variables in one statement. Large
-  // imports can contain over 100k templates, so load their items in batches.
+  // Keep large imports bounded by loading template items in batches.
   const itemRows = [];
   const itemRowsStmtCache = new Map();
   for (let start = 0; start < templateIds.length; start += 500) {
@@ -4852,13 +4836,27 @@ function invalidateAssignedTaskListCache() {
 
 function invalidateScorerQueryCaches() {
   invalidateAssignedTaskListCache();
-  queryWorkerPool?.invalidate([
-    "assignedTasks",
-    "assignedTaskOptions",
-    "scorerDashboard",
-    "images",
-    "feedbacks",
-  ]);
+  scorerDashboardCache.clear();
+}
+
+async function assignedTaskOptions(query = {}) {
+  const scorer = String(query.scorer || "").trim();
+  if (!scorer) throw httpError(400, "缺少打分人");
+  if (!(await selectScorerByUsernameStmt.get(scorer))) {
+    throw httpError(404, "打分账号不存在");
+  }
+  const rows = await db.prepare(`
+    SELECT projects.id AS _id, projects.name
+    FROM scorer_task_stats
+    JOIN projects ON projects.id = scorer_task_stats.projectId
+    WHERE scorer_task_stats.taskVersion = ?
+      AND scorer_task_stats.scorer = ?
+      AND scorer_task_stats.projectId <> ''
+      AND (scorer_task_stats.assigned + scorer_task_stats.completed) > 0
+      AND projects.deletionRequestedAt IS NULL
+    ORDER BY projects.createdAt DESC, projects.id ASC
+  `).all(taskVersion, scorer);
+  return { projects: rows.map(({ _id, name }) => ({ _id, name })) };
 }
 
 async function listAssignedTasks(query = {}) {
@@ -6355,7 +6353,7 @@ app.delete("/api/users/scorers/:id", async (req, res, next) => {
 app.get("/api/tasks/assigned/options", async (req, res, next) => {
   try {
     setShortApiCache(res);
-    res.json(await getQueryWorkerPool().run("assignedTaskOptions", {
+    res.json(await assignedTaskOptions({
       scorer: req.auth.username,
     }));
   } catch (error) {
@@ -6366,7 +6364,7 @@ app.get("/api/tasks/assigned/options", async (req, res, next) => {
 app.get("/api/tasks/assigned", async (req, res, next) => {
   try {
     setShortApiCache(res);
-    res.json(await getQueryWorkerPool().run("assignedTasks", {
+    res.json(await listAssignedTasks({
       ...req.query,
       scorer: req.auth.username,
     }));
@@ -6378,7 +6376,7 @@ app.get("/api/tasks/assigned", async (req, res, next) => {
 app.get("/api/scorer/dashboard", async (req, res, next) => {
   try {
     setShortApiCache(res);
-    res.json(await getQueryWorkerPool().run("scorerDashboard", {
+    res.json(await getScorerDashboard({
       ...req.query,
       scorer: req.auth.username,
     }));
@@ -6390,7 +6388,7 @@ app.get("/api/scorer/dashboard", async (req, res, next) => {
 app.get("/api/feedbacks", async (req, res, next) => {
   try {
     setShortApiCache(res);
-    res.json(await getQueryWorkerPool().run("feedbacks", req.query));
+    res.json(await listFeedbacks(req.query));
   } catch (error) {
     next(error);
   }
@@ -6578,7 +6576,7 @@ app.get("/api/images", async (req, res, next) => {
     if (req.query.subjectId)
       await assertSubjectAccess(String(req.query.subjectId), req.auth);
     setShortApiCache(res);
-    res.json(await getQueryWorkerPool().run("images", req.query));
+    res.json(await listImages(req.query));
   } catch (error) {
     next(error);
   }
@@ -7165,7 +7163,6 @@ app.put("/api/images/:id/score", async (req, res, next) => {
       scorer: score.scorer ?? current.scorer ?? null,
       updatedAt: score.ratedAt,
     });
-    queryWorkerPool?.invalidate(["images"]);
 
     const updated = await selectImageByIdStmt.get(req.params.id);
     res.json(imageDto(updated));

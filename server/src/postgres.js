@@ -1,6 +1,5 @@
 import "dotenv/config";
 import fs from "node:fs/promises";
-import { isMainThread } from "node:worker_threads";
 import { AsyncLocalStorage } from "node:async_hooks";
 import pg from "pg";
 
@@ -25,12 +24,10 @@ export const projectSelectColumns = `
 export const imageSelectColumns = `id AS _id, subjectId, filename, originalPath, storagePath, thumbnailPath, mimeType, category, directory, isInfographic, prompt, catalogData, importBatch, scorer, ${scoreNumericFields.join(", ")}, ${scoreStateFields.join(", ")}, discomfort, comment, ratedAt, createdAt, updatedAt`;
 export const userSelectColumns = "id, username, role, status, lastLoginAt, createdAt, updatedAt";
 
-const defaultPoolMax = isMainThread ? 12 : 1;
-const poolMaxVariable = isMainThread ? "PG_POOL_MAX" : "PG_WORKER_POOL_MAX";
-const configuredPoolMax = Number.parseInt(process.env[poolMaxVariable] || "", 10);
-const defaultStatementTimeout = isMainThread ? 15000 : 10000;
-const statementTimeoutVariable = isMainThread ? "PG_STATEMENT_TIMEOUT_MS" : "PG_WORKER_STATEMENT_TIMEOUT_MS";
-const configuredStatementTimeout = Number.parseInt(process.env[statementTimeoutVariable] || "", 10);
+const defaultPoolMax = 16;
+const configuredPoolMax = Number.parseInt(process.env.PG_POOL_MAX || "", 10);
+const defaultStatementTimeout = 15000;
+const configuredStatementTimeout = Number.parseInt(process.env.PG_STATEMENT_TIMEOUT_MS || "", 10);
 const statementTimeout = Number.isInteger(configuredStatementTimeout) && configuredStatementTimeout > 0
   ? configuredStatementTimeout
   : defaultStatementTimeout;
@@ -45,7 +42,7 @@ const pool = new Pool({
 const transactionStorage = new AsyncLocalStorage();
 const camelNames = new Map();
 
-for (const file of ["app.js", "query-worker.js", "services/admin-dashboard.js", "services/admin-scoring.js"]) {
+for (const file of ["app.js", "services/admin-dashboard.js", "services/admin-scoring.js"]) {
   try {
     const source = await fs.readFile(new URL(`./${file}`, import.meta.url), "utf8");
     for (const match of source.matchAll(/\b[A-Za-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*\b/g)) {
@@ -155,6 +152,6 @@ export const db = {
 };
 
 const schema = await fs.readFile(new URL("./postgres-schema.sql", import.meta.url), "utf8");
-if (isMainThread) await pool.query(schema);
+await pool.query(schema);
 
 export { pool };
