@@ -25,7 +25,15 @@ export const projectSelectColumns = `
 export const imageSelectColumns = `id AS _id, subjectId, filename, originalPath, storagePath, thumbnailPath, mimeType, category, directory, isInfographic, prompt, catalogData, importBatch, scorer, ${scoreNumericFields.join(", ")}, ${scoreStateFields.join(", ")}, discomfort, comment, ratedAt, createdAt, updatedAt`;
 export const userSelectColumns = "id, username, role, status, lastLoginAt, createdAt, updatedAt";
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const defaultPoolMax = isMainThread ? 12 : 1;
+const poolMaxVariable = isMainThread ? "PG_POOL_MAX" : "PG_WORKER_POOL_MAX";
+const configuredPoolMax = Number.parseInt(process.env[poolMaxVariable] || "", 10);
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: Number.isInteger(configuredPoolMax) && configuredPoolMax > 0 ? configuredPoolMax : defaultPoolMax,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+});
 const transactionStorage = new AsyncLocalStorage();
 const camelNames = new Map();
 

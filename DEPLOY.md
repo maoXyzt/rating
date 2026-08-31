@@ -231,11 +231,17 @@ API 已只使用 PostgreSQL；不要再设置 `DB_PATH` 或挂载 SQLite 数据�
 PORT: 3000
 DATABASE_URL: postgresql://用户名:密码@postgres:5432/数据库名
 UPLOAD_DIR: /app/uploads
+PG_POOL_MAX: 12
+PG_WORKER_POOL_MAX: 1
+QUERY_WORKERS: 12
+QUERY_MAX_QUEUE: 120
 ```
 
 `POSTGRES_PASSWORD` 必须通过 `.env` 或部署环境设置；不要提交到仓库。
 
 `RATING_DATA_DIR` 用于配置宿主机数据根目录，默认值为 `/data/sunwenxiu/rating`；修改 `.env` 后重新执行 `docker compose up` 即可生效。需要在宿主机执行备份或恢复命令时，先按第 5 节加载该变量。
+
+按约 100 人同时使用的单 API 实例，以上连接配置最多约 24 条 PostgreSQL 连接（主进程 12 条 + 12 个 worker 各 1 条）。`QUERY_MAX_QUEUE` 是应用层保护队列，默认约为 worker 数的 10 倍；排队超过 5 秒会返回 503，不建议无限增大。
 
 可选的安全和上传限制配置：
 

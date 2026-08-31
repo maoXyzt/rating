@@ -1,8 +1,13 @@
 import crypto from "node:crypto";
 import { Worker } from "node:worker_threads";
 
-const WORKER_COUNT = 8;
-const MAX_QUEUE = 128;
+function positiveEnvInt(name, fallback) {
+  const value = Number.parseInt(process.env[name] || "", 10);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+const WORKER_COUNT = positiveEnvInt("QUERY_WORKERS", 12);
+const MAX_QUEUE = positiveEnvInt("QUERY_MAX_QUEUE", WORKER_COUNT * 10);
 const QUERY_TIMEOUT_MS = 5000;
 const QUERY_DEADLINE_MS = 5000;
 

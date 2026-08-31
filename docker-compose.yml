@@ -23,6 +23,10 @@ services:
       PORT: 3000
       DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-image_rating}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-image_rating}}
       UPLOAD_DIR: /app/uploads
+      PG_POOL_MAX: ${PG_POOL_MAX:-12}
+      PG_WORKER_POOL_MAX: ${PG_WORKER_POOL_MAX:-1}
+      QUERY_WORKERS: ${QUERY_WORKERS:-12}
+      QUERY_MAX_QUEUE: ${QUERY_MAX_QUEUE:-120}
     volumes:
       - ${RATING_DATA_DIR:-/data/sunwenxiu/rating}/uploads:/app/uploads
       - ${RATING_DATA_DIR:-/data/sunwenxiu/rating}/inbox:/app/inbox
