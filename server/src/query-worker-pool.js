@@ -4,7 +4,7 @@ import { databasePath } from "./database-path.js";
 
 const WORKER_COUNT = 8;
 const MAX_QUEUE = 128;
-const QUERY_TIMEOUT_MS = 1000;
+const QUERY_TIMEOUT_MS = 5000;
 const QUERY_DEADLINE_MS = 5000;
 
 export class QueryOverloadedError extends Error {
@@ -52,6 +52,8 @@ export function createQueryWorkerPool(options = {}) {
     assignedTasks: 1000,
     assignedTaskOptions: 60000,
     scorerDashboard: 2000,
+    images: 1500,
+    feedbacks: 1500,
     ...(options.ttlByOperation || {}),
   };
 
