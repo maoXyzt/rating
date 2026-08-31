@@ -37,10 +37,14 @@ const pool = new Pool({
   max: Number.isInteger(configuredPoolMax) && configuredPoolMax > 0 ? configuredPoolMax : defaultPoolMax,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
-  options: `-c statement_timeout=${statementTimeout} -c lock_timeout=${Number.isInteger(lockTimeout) && lockTimeout > 0 ? lockTimeout : 2000}`,
+  options: `-c statement_timeout=${statementTimeout} -c lock_timeout=${Number.isInteger(lockTimeout) && lockTimeout > 0 ? lockTimeout : 2000} -c idle_in_transaction_session_timeout=60000`,
 });
 const transactionStorage = new AsyncLocalStorage();
 const camelNames = new Map();
+
+export function runWithDatabaseContext(callback) {
+  return transactionStorage.run({ client: null }, callback);
+}
 
 for (const file of ["app.js", "services/admin-dashboard.js", "services/admin-scoring.js"]) {
   try {
@@ -74,7 +78,7 @@ function normalizeSql(source, named = false) {
 }
 
 function currentClient() {
-  return transactionStorage.getStore() || pool;
+  return transactionStorage.getStore()?.client || pool;
 }
 
 async function query(sql, params = []) {
@@ -114,20 +118,23 @@ class PreparedStatement {
 async function exec(sql) {
   const statement = String(sql).trim();
   if (/^BEGIN\b/i.test(statement)) {
-    if (transactionStorage.getStore()) throw new Error("数据库事务已在进行中");
+    const context = transactionStorage.getStore();
+    if (!context) throw new Error("数据库事务必须在请求上下文中启动");
+    if (context.client) throw new Error("数据库事务已在进行中");
     const client = await pool.connect();
     await client.query("BEGIN");
-    transactionStorage.enterWith(client);
+    context.client = client;
     return;
   }
   if (/^COMMIT\b/i.test(statement) || /^ROLLBACK\b/i.test(statement)) {
-    const client = transactionStorage.getStore();
+    const context = transactionStorage.getStore();
+    const client = context?.client;
     if (!client) return;
     try {
       await client.query(statement);
     } finally {
       client.release();
-      transactionStorage.enterWith(null);
+      context.client = null;
     }
     return;
   }

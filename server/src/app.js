@@ -28,6 +28,7 @@ import {
   projectSelectColumns,
   subjectSelectColumns,
   userSelectColumns,
+  runWithDatabaseContext,
 } from "./postgres.js";
 import { createAdminDashboardService } from "./services/admin-dashboard.js";
 import { createAdminScoringService } from "./services/admin-scoring.js";
@@ -82,6 +83,7 @@ app.use(
   }),
 );
 app.use(express.json({ limit: "2mb" }));
+app.use((_req, _res, next) => runWithDatabaseContext(() => next()));
 
 function positiveLimit(name, fallback) {
   const configured = Number(process.env[name]);

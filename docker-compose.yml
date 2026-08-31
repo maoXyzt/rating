@@ -2,6 +2,8 @@ services:
   postgres:
     image: postgres:18-trixie
     restart: unless-stopped
+    mem_limit: 8g
+    mem_reservation: 2g
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-image_rating}
       # The official image creates POSTGRES_USER as a superuser on init.
