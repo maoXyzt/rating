@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: image_rating
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
-      - ${RATING_DATA_DIR:-/data/sunwenxiu/rating}/postgres:/var/lib/postgresql
+      - ${POSTGRES_DATA_DIR:-/var/lib/rating/postgres}:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
