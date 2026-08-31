@@ -336,7 +336,7 @@ export function createAdminScoringService({
          JOIN projects ON projects.id = rating_tasks.projectId
          ${filter.where}
          ${cursor ? "AND (rating_tasks.completedAt < ? OR (rating_tasks.completedAt = ? AND rating_tasks.id > ?))" : ""}
-         ORDER BY rating_tasks.completedAt DESC, rating_tasks.id ASC
+         ORDER BY rating_tasks.completedAt DESC NULLS LAST, rating_tasks.id ASC
          LIMIT ?${cursor ? "" : " OFFSET ?"}`,
       )
       .all(

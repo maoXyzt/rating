@@ -197,7 +197,7 @@ export function createAdminDashboardService({
          WHERE rating_tasks.taskVersion = ?
            AND rating_tasks.status = 'completed'
            ${filter.clause}
-         ORDER BY rating_tasks.completedAt DESC, rating_tasks.id ASC
+         ORDER BY rating_tasks.completedAt DESC NULLS LAST, rating_tasks.id ASC
          LIMIT ? OFFSET ?`,
       )
       .all(taskVersion, ...filter.params, limit, offset);

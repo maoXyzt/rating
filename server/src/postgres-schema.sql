@@ -281,7 +281,6 @@ create table if not exists feedback_messages (
     createdat text not null,
     foreign key (feedbackid) references feedbacks(id) on delete cascade
   );
-60
 create index if not exists idx_subjects_createdat on subjects(createdat desc);
 create index if not exists idx_projects_createdat on projects(createdat desc);
 create index if not exists idx_projects_deleted_created
@@ -318,6 +317,8 @@ create index if not exists idx_rating_tasks_subject_version_task_type_order
     on rating_tasks(subjectid, taskversion, tasktype, round, createdat, id);
 create index if not exists idx_rating_tasks_project_template
     on rating_tasks(projectid, taskversion, subjectid, round, tasktype, imagekey);
+create index if not exists idx_rating_tasks_project
+    on rating_tasks(projectid, taskversion, round, tasktype);
 create index if not exists idx_rating_tasks_project_order
     on rating_tasks(projectid, taskversion, tasktype, createdat, id);
 create index if not exists idx_rating_tasks_project_status_order
@@ -325,7 +326,7 @@ create index if not exists idx_rating_tasks_project_status_order
 create index if not exists idx_rating_tasks_project_scorer_order
     on rating_tasks(projectid, taskversion, scorer, tasktype, createdat, id);
 create index if not exists idx_rating_tasks_scorer_status on rating_tasks(scorer, status, subjectid);
-create index if not exists idx_rating_tasks_export on rating_tasks(taskversion, status, completedat desc, id);
+create index if not exists idx_rating_tasks_export on rating_tasks(taskversion, status, completedat desc nulls last, id);
 create index if not exists idx_rating_tasks_scorer_version_status on rating_tasks(scorer, taskversion, status, subjectid);
 create index if not exists idx_rating_tasks_scorer_version_status_updated
     on rating_tasks(scorer, taskversion, status, updatedat desc, id);
