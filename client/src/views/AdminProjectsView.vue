@@ -4,6 +4,7 @@ import { NButton, NProgress, NTag, useDialog, useMessage, type DataTableColumns,
 import { useRouter } from 'vue-router';
 import { authApi } from '../services/auth';
 import { imageApi, type TaskAllocationImportResult } from '../services/images';
+import { parseTaskAllocationWorkbook } from '../utils/task-allocation';
 import { useTaskStackStore } from '../stores/taskStack';
 import type { ProjectItem, SubjectItem } from '../types/image';
 import { formatDateTime } from '../utils/time';
@@ -393,7 +394,7 @@ async function importAllocationSheet({ file, onFinish, onError }: UploadCustomRe
   }
   allocationImporting.value = true;
   try {
-    const result = await imageApi.importProjectTaskAllocations(project._id, file.file);
+    const result = await parseTaskAllocationWorkbook(file.file);
     applyAllocationImport(result);
     message.success(`已读取 ${result.rows.length} 行分配数据`);
     onFinish();
