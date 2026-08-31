@@ -119,7 +119,7 @@ async function exec(sql) {
   const statement = String(sql).trim();
   if (/^BEGIN\b/i.test(statement)) {
     const context = transactionStorage.getStore();
-    if (!context) throw new Error("数据库事务必须在请求上下文中启动");
+    if (!context) throw new Error("数据库事务必须在数据库上下文中启动");
     if (context.client) throw new Error("数据库事务已在进行中");
     const client = await pool.connect();
     await client.query("BEGIN");

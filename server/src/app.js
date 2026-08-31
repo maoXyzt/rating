@@ -3251,7 +3251,7 @@ function queueSubjectDeletion(subjectId) {
 
   queuedSubjectDeletionIds.add(subjectId);
   setImmediate(async () => {
-    void (await deleteQueuedSubject(subjectId));
+    void (await runWithDatabaseContext(() => deleteQueuedSubject(subjectId)));
   });
 }
 

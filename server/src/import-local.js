@@ -2,6 +2,7 @@ import "dotenv/config";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { importZipArchive } from "./app.js";
+import { runWithDatabaseContext } from "./postgres.js";
 
 function usage() {
   console.error("用法: node src/import-local.js <容器内 ZIP 路径> [--keep]");
@@ -55,13 +56,15 @@ async function main() {
     throw new Error("ZIP 文件不存在或为空");
   }
 
-  const result = await importZipArchive(zipPath, originalFilename, {
-    removeSource: false,
-    onProgress: ({ current, total }) => {
-      const progress = total ? Math.round((current / total) * 100) : 0;
-      process.stderr.write(`导入进度: ${progress}% (${current}/${total})\r`);
-    },
-  });
+  const result = await runWithDatabaseContext(() =>
+    importZipArchive(zipPath, originalFilename, {
+      removeSource: false,
+      onProgress: ({ current, total }) => {
+        const progress = total ? Math.round((current / total) * 100) : 0;
+        process.stderr.write(`导入进度: ${progress}% (${current}/${total})\r`);
+      },
+    }),
+  );
   process.stderr.write("\n");
 
   if (!options.includes("--keep")) {
