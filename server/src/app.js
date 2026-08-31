@@ -3551,16 +3551,9 @@ function ensureFileAccess(req, _res, next) {
   if (!storagePath || storagePath.startsWith("_")) {
     return next(httpError(404, "文件不存在"));
   }
-  if (req.auth?.role === "admin") return next();
-  if (storagePath.startsWith("feedback/")) {
-    return next();
+  if (!imageExts.has(path.extname(storagePath).toLowerCase())) {
+    return next(httpError(404, "文件不存在"));
   }
-  const allowed = selectAssignedTaskForImageStmt.get(
-    req.auth?.username || "",
-    storagePath,
-    storagePath,
-  );
-  if (!allowed) return next(httpError(403, "无权访问该图片"));
   return next();
 }
 
@@ -6115,7 +6108,7 @@ function getScorers(subjectId) {
   return rows.map((row) => row.scorer);
 }
 
-app.use("/files", requireAuth, ensureFileAccess, express.static(uploadDir));
+app.use("/files", ensureFileAccess, express.static(uploadDir));
 
 app.post("/api/auth/login", async (req, res, next) => {
   try {
