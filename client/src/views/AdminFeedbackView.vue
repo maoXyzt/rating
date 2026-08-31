@@ -3,6 +3,7 @@ import { h, onMounted, reactive, ref } from 'vue';
 import { NButton, NImage, NTag, useMessage, type DataTableColumns } from 'naive-ui';
 import { imageApi } from '../services/images';
 import type { FeedbackItem, FeedbackStatus, FeedbackType } from '../types/image';
+import { formatDateTime } from '../utils/time';
 
 const message = useMessage();
 const loading = ref(false);
@@ -40,7 +41,7 @@ function typeLabel(value: FeedbackType) {
 }
 
 function formatDate(value: string | null) {
-  return value ? new Date(value).toLocaleString() : '-';
+  return formatDateTime(value);
 }
 
 function feedbackCanReply(feedback: FeedbackItem | null) {

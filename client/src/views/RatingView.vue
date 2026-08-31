@@ -17,8 +17,6 @@ const taskStatsState = ref<'loading' | 'ready' | 'stale' | 'unavailable'>('loadi
 const taskTotal = ref(0);
 const taskPage = ref(1);
 const taskPageSize = ref(5);
-const taskHasMore = ref(false);
-const taskCursors = ref<Record<number, string | null>>({ 1: null });
 const activeTask = ref<RatingTask | null>(null);
 const rankingVisible = ref(false);
 const openingTaskId = ref<string | null>(null);
@@ -115,18 +113,15 @@ async function loadTasks(page = taskPage.value, pageSize = taskPageSize.value) {
   loading.value = true;
   taskListState.value = tasks.value.length ? 'stale' : 'loading';
   try {
-    if (page === 1) taskCursors.value = { 1: null };
     const result = await imageApi.assignedTasks({
       scorer,
       page,
       pageSize,
-      cursor: taskCursors.value[page] || null,
+      includeTotal: true,
       ...taskFilters
     });
     tasks.value = result.tasks;
     taskTotal.value = result.total ?? 0;
-    taskHasMore.value = result.hasMore;
-    if (result.nextCursor) taskCursors.value[page + 1] = result.nextCursor;
     taskPage.value = result.page;
     taskPageSize.value = result.pageSize;
     taskListState.value = 'ready';
@@ -403,8 +398,8 @@ onBeforeUnmount(() => {
         <div v-else class="empty">暂无任务</div>
       </div>
       <div class="scorer-task-table-footer">
-        <n-pagination v-if="taskHasMore || taskPage > 1" :page="taskPage" :page-size="taskPageSize"
-          :page-count="taskPage + (taskHasMore ? 1 : 0)" show-size-picker
+        <n-pagination v-if="taskTotal > 0" :page="taskPage" :page-size="taskPageSize"
+          :page-count="Math.ceil(taskTotal / taskPageSize)" show-size-picker
           :page-sizes="[5, 10, 20, 50]" :prefix="paginationPrefix" @update:page="changePage"
           @update:page-size="changePageSize" />
       </div>

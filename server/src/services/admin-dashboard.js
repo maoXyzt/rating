@@ -39,9 +39,9 @@ export function createAdminDashboardService({
   const dashboardCache = new Map();
   const dashboardCacheTtlMs = 15 * 1000;
 
-  function cachedDashboardValue(key, producer) {
+  async function cachedDashboardValue(key, producer) {
     const cached = dashboardCache.get(key);
-    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    if (cached && cached.expiresAt > Date.now()) return await cached.value;
     const value = producer();
     dashboardCache.set(key, {
       value,
@@ -98,46 +98,46 @@ export function createAdminDashboardService({
       AND durationMs >= 0
   `);
 
-  function parseDashboardProjectIds(query = {}) {
+  async function parseDashboardProjectIds(query = {}) {
     const rawIds = parseQueryList(query.projectIds ?? query.projectId);
     const ids = [...new Set(rawIds)];
     if (ids.length > 100) throw httpError(400, "一次最多选择 100 个项目");
-    ids.forEach(parseProjectId);
+    await Promise.all(ids.map((id) => parseProjectId(id)));
     return ids;
   }
 
-  function parseDashboardTeamIds(query = {}) {
-    return normalizeTeamIds(parseQueryList(query.teamIds ?? query.teamId));
+  async function parseDashboardTeamIds(query = {}) {
+    return await normalizeTeamIds(parseQueryList(query.teamIds ?? query.teamId));
   }
 
-  function parseDashboardScorerIds(query = {}) {
+  async function parseDashboardScorerIds(query = {}) {
     const rawIds = parseQueryList(query.scorerIds ?? query.scorerId ?? query.scorer);
-    const ids = [...new Set(rawIds.map((value) => {
-      const user = selectUserByIdStmt.get(value) || selectScorerByUsernameStmt.get(value);
+    const ids = [...new Set(await Promise.all(rawIds.map(async value => {
+      const user = (await selectUserByIdStmt.get(value)) || (await selectScorerByUsernameStmt.get(value));
       if (!user || user.role !== "scorer") throw httpError(400, "打分人不存在");
       return user.id;
-    }))];
+    })))];
     if (!ids.length) throw httpError(400, "请选择需要导出的打分人");
     if (ids.length > 100) throw httpError(400, "一次最多选择 100 位打分人");
     return ids;
   }
 
-  function listDashboardScorerExportUsers(scorerIds) {
-    return scorerIds.map((scorerId) => {
-      const user = selectUserByIdStmt.get(scorerId);
+  async function listDashboardScorerExportUsers(scorerIds) {
+    return await Promise.all(scorerIds.map(async scorerId => {
+      const user = await selectUserByIdStmt.get(scorerId);
       if (!user || user.role !== "scorer") throw httpError(400, "打分人不存在");
       return user;
-    });
+    }));
   }
 
-  function parseTeamSummaryExportIds(query = {}) {
-    const teamIds = parseDashboardTeamIds(query);
+  async function parseTeamSummaryExportIds(query = {}) {
+    const teamIds = await parseDashboardTeamIds(query);
     if (!teamIds.length) throw httpError(400, "请选择需要导出的团队");
     return teamIds;
   }
 
-  function defaultDashboardProjectId() {
-    const row = db
+  async function defaultDashboardProjectId() {
+    const row = await db
       .prepare(
         `SELECT id
          FROM projects
@@ -166,10 +166,10 @@ export function createAdminDashboardService({
     };
   }
 
-  function countCompletedTasks(filters = {}) {
+  async function countCompletedTasks(filters = {}) {
     const filter = completedTaskExportFilter(filters);
     return Number(
-      db
+      (await db
         .prepare(
           `SELECT COUNT(*) AS total
            FROM rating_tasks
@@ -177,13 +177,13 @@ export function createAdminDashboardService({
              AND status = 'completed'
              ${filter.clause}`,
         )
-        .get(taskVersion, ...filter.params).total || 0,
+        .get(taskVersion, ...filter.params)).total || 0,
     );
   }
 
-  function listCompletedTaskRows(filters = {}, limit = 200, offset = 0) {
+  async function listCompletedTaskRows(filters = {}, limit = 200, offset = 0) {
     const filter = completedTaskExportFilter(filters, "rating_tasks");
-    return db
+    return await db
       .prepare(
         `SELECT rating_tasks.id, rating_tasks.subjectId, rating_tasks.projectId, rating_tasks.taskVersion,
                 rating_tasks.taskType, rating_tasks.status, rating_tasks.scorer, rating_tasks.ranking, rating_tasks.excludedImageIds, rating_tasks.correctImageIds, rating_tasks.rankingRelations,
@@ -197,15 +197,15 @@ export function createAdminDashboardService({
          WHERE rating_tasks.taskVersion = ?
            AND rating_tasks.status = 'completed'
            ${filter.clause}
-         ORDER BY rating_tasks.completedAt DESC, rating_tasks.id ASC
+         ORDER BY rating_tasks.completedAt DESC NULLS LAST, rating_tasks.id ASC
          LIMIT ? OFFSET ?`,
       )
       .all(taskVersion, ...filter.params, limit, offset);
   }
 
-  function listCompletedExportProjects(filters = {}) {
+  async function listCompletedExportProjects(filters = {}) {
     const exportFilter = completedTaskExportFilter(filters, "rating_tasks");
-    return db
+    return (await db
       .prepare(
         `SELECT projects.id AS projectId,
                 projects.name AS projectName,
@@ -219,7 +219,7 @@ export function createAdminDashboardService({
          GROUP BY projects.id, projects.name
          ORDER BY projects.createdAt DESC, projects.id ASC`,
       )
-      .all(taskVersion, ...exportFilter.params)
+      .all(taskVersion, ...exportFilter.params))
       .map((row) => ({
         projectId: row.projectId,
         projectName: row.projectName,
@@ -227,9 +227,9 @@ export function createAdminDashboardService({
       }));
   }
 
-  function listCompletedExportScorers(filters = {}) {
+  async function listCompletedExportScorers(filters = {}) {
     const exportFilter = completedTaskExportFilter(filters, "rating_tasks");
-    return db
+    return (await db
       .prepare(
         `SELECT users.id AS scorerId,
                 rating_tasks.scorer AS scorer,
@@ -244,9 +244,9 @@ export function createAdminDashboardService({
            AND TRIM(rating_tasks.scorer) <> ''
            ${exportFilter.clause}
          GROUP BY users.id, rating_tasks.scorer, users.status
-         ORDER BY taskCount DESC, rating_tasks.scorer COLLATE NOCASE ASC`,
+         ORDER BY taskCount DESC, LOWER(rating_tasks.scorer) ASC, rating_tasks.scorer ASC`,
       )
-      .all(taskVersion, ...exportFilter.params)
+      .all(taskVersion, ...exportFilter.params))
       .map((row) => ({
         scorerId: row.scorerId,
         scorer: row.scorer,
@@ -255,8 +255,8 @@ export function createAdminDashboardService({
       }));
   }
 
-  function projectTaskStatusCounts(projectId) {
-    const row = db
+  async function projectTaskStatusCounts(projectId) {
+    const row = await db
       .prepare(
         `SELECT pending, assigned, completed
          FROM project_task_stats
@@ -270,8 +270,8 @@ export function createAdminDashboardService({
     };
   }
 
-  function getProjectOrThrow(projectId) {
-    const project = db
+  async function getProjectOrThrow(projectId) {
+    const project = await db
       .prepare(
         `SELECT projects.id,
                 projects.name,
@@ -286,8 +286,8 @@ export function createAdminDashboardService({
     return project;
   }
 
-  function listProjectPackages(projectId, fallbackPackageId) {
-    const rows = db
+  async function listProjectPackages(projectId, fallbackPackageId) {
+    const rows = await db
       .prepare(
         `SELECT subjects.id,
                 subjects.name,
@@ -301,11 +301,11 @@ export function createAdminDashboardService({
          LEFT JOIN subject_task_templates ON subject_task_templates.subjectId = subjects.id
          WHERE project_packages.projectId = ?
          GROUP BY subjects.id, subjects.name, subjects.imageCount, subjects.categoryCount, subjects.taskStatus, subjects.status
-         ORDER BY project_packages.createdAt ASC, subjects.name COLLATE NOCASE ASC`,
+         ORDER BY project_packages.createdAt ASC, LOWER(subjects.name) ASC, subjects.name ASC`,
       )
       .all(projectId);
     if (rows.length || !fallbackPackageId) return rows;
-    return db
+    return await db
       .prepare(
         `SELECT subjects.id,
                 subjects.name,
@@ -322,13 +322,13 @@ export function createAdminDashboardService({
       .all(fallbackPackageId);
   }
 
-  function getDashboardProjectSummary(projectId) {
+  async function getDashboardProjectSummary(projectId) {
     if (!projectId) return null;
-    const project = getProjectOrThrow(projectId);
-    const packageRows = listProjectPackages(project.id, project.packageId);
-    const statusCounts = projectTaskStatusCounts(projectId);
+    const project = await getProjectOrThrow(projectId);
+    const packageRows = await listProjectPackages(project.id, project.packageId);
+    const statusCounts = await projectTaskStatusCounts(projectId);
     const totalTasks = statusCounts.pending + statusCounts.assigned + statusCounts.completed;
-    const criterionRows = db
+    const criterionRows = await db
       .prepare(
         `SELECT DISTINCT taskType
          FROM rating_tasks
@@ -336,7 +336,7 @@ export function createAdminDashboardService({
       )
       .all(projectId, taskVersion);
     const scorerCount = Number(
-      db
+      (await db
         .prepare(
           `SELECT COUNT(DISTINCT scorer) AS total
            FROM rating_tasks
@@ -345,9 +345,9 @@ export function createAdminDashboardService({
              AND scorer IS NOT NULL
              AND TRIM(scorer) <> ''`,
         )
-        .get(projectId, taskVersion).total || 0,
+        .get(projectId, taskVersion)).total || 0,
     );
-    const averageDurationMs = db
+    const averageDurationMs = (await db
       .prepare(
         `SELECT AVG(durationMs) AS value
          FROM rating_tasks
@@ -356,7 +356,7 @@ export function createAdminDashboardService({
            AND status = 'completed'
            AND durationMs >= 0`,
       )
-      .get(projectId, taskVersion).value;
+      .get(projectId, taskVersion)).value;
 
     return {
       projectId: project.id,
@@ -380,17 +380,17 @@ export function createAdminDashboardService({
     };
   }
 
-  function listDashboardPeakHours(projectId = null) {
-    const rows = db
+  async function listDashboardPeakHours(projectId = null) {
+    const rows = await db
       .prepare(
-        `SELECT CAST(strftime('%H', completedAt) AS INTEGER) AS hour,
+        `SELECT EXTRACT(HOUR FROM completedAt AT TIME ZONE 'Asia/Shanghai')::integer AS hour,
                 COUNT(*) AS count
          FROM rating_tasks
          WHERE taskVersion = ?
            AND status = 'completed'
            AND completedAt IS NOT NULL
            AND (? IS NULL OR projectId = ?)
-         GROUP BY strftime('%H', completedAt)
+         GROUP BY EXTRACT(HOUR FROM completedAt AT TIME ZONE 'Asia/Shanghai')
          ORDER BY hour ASC`,
       )
       .all(taskVersion, projectId, projectId);
@@ -417,8 +417,8 @@ export function createAdminDashboardService({
     };
   }
 
-  function listDashboardScorerProgress(projectId = null) {
-    return db
+  async function listDashboardScorerProgress(projectId = null) {
+    return (await db
       .prepare(
         `SELECT users.id,
                 users.username AS name,
@@ -435,15 +435,15 @@ export function createAdminDashboardService({
            AND TRIM(rating_tasks.scorer) <> ''
            AND (? IS NULL OR rating_tasks.projectId = ?)
          GROUP BY users.id, users.username, users.status
-         ORDER BY completedTaskCount DESC, totalTaskCount DESC, users.username COLLATE NOCASE ASC
+         ORDER BY completedTaskCount DESC, totalTaskCount DESC, LOWER(users.username) ASC, users.username ASC
          LIMIT 12`,
       )
-      .all(taskVersion, projectId, projectId)
+      .all(taskVersion, projectId, projectId))
       .map(progressSummaryDto);
   }
 
-  function listDashboardTeamProgress(projectId = null) {
-    return db
+  async function listDashboardTeamProgress(projectId = null) {
+    return (await db
       .prepare(
         `SELECT teams.id,
                 teams.name,
@@ -462,29 +462,23 @@ export function createAdminDashboardService({
            AND TRIM(rating_tasks.scorer) <> ''
            AND (? IS NULL OR rating_tasks.projectId = ?)
          GROUP BY teams.id, teams.name, teams.status
-         ORDER BY completedTaskCount DESC, totalTaskCount DESC, teams.name COLLATE NOCASE ASC
+         ORDER BY completedTaskCount DESC, totalTaskCount DESC, LOWER(teams.name) ASC, teams.name ASC
          LIMIT 12`,
       )
-      .all(taskVersion, projectId, projectId)
+      .all(taskVersion, projectId, projectId))
       .map(progressSummaryDto);
   }
 
-  function getDashboardProgressSummary(projectId = null) {
-    return cachedDashboardValue(`progress:${projectId || "none"}`, () => ({
-      scorers: listDashboardScorerProgress(projectId),
-      teams: listDashboardTeamProgress(projectId),
+  async function getDashboardProgressSummary(projectId = null) {
+    return cachedDashboardValue(`progress:${projectId || "none"}`, async () => ({
+      scorers: await listDashboardScorerProgress(projectId),
+      teams: await listDashboardTeamProgress(projectId)
     }));
   }
 
-  function getDashboardStats() {
-    return cachedDashboardValue("stats", () => {
-      const stats = selectAdminDashboardStatsStmt.get(
-        taskVersion,
-        taskVersion,
-        taskVersion,
-        taskVersion,
-        taskVersion,
-      );
+  async function getDashboardStats() {
+    return cachedDashboardValue("stats", async () => {
+      const stats = await selectAdminDashboardStatsStmt.get(taskVersion, taskVersion, taskVersion, taskVersion, taskVersion);
       return {
         projectCount: Number(stats.projectCount || 0),
         completedProjectCount: Number(stats.completedProjectCount || 0),
@@ -499,27 +493,27 @@ export function createAdminDashboardService({
     });
   }
 
-  function getDashboardProjectSection(query = {}) {
+  async function getDashboardProjectSection(query = {}) {
     const projectId = query.projectId
-      ? parseProjectId(query.projectId)
-      : defaultDashboardProjectId();
-    return cachedDashboardValue(`project:${projectId || "none"}`, () => ({
+      ? await parseProjectId(query.projectId)
+      : await defaultDashboardProjectId();
+    return cachedDashboardValue(`project:${projectId || "none"}`, async () => ({
       selectedProjectId: projectId,
-      projectSummary: getDashboardProjectSummary(projectId),
+      projectSummary: await getDashboardProjectSummary(projectId)
     }));
   }
 
-  function getDashboardCharts() {
-    return cachedDashboardValue("charts", () => {
+  async function getDashboardCharts() {
+    return cachedDashboardValue("charts", async () => {
       return {
-        peakHours: listDashboardPeakHours(),
+        peakHours: await listDashboardPeakHours(),
       };
     });
   }
 
-  function getDashboardAverageDuration() {
-    return cachedDashboardValue("average-duration", () => {
-      const duration = selectAdminDashboardAverageDurationStmt.get(taskVersion);
+  async function getDashboardAverageDuration() {
+    return cachedDashboardValue("average-duration", async () => {
+      const duration = await selectAdminDashboardAverageDurationStmt.get(taskVersion);
       return {
         averageDurationSeconds:
           duration.averageDurationMs == null ? null : duration.averageDurationMs / 1000,
@@ -527,9 +521,9 @@ export function createAdminDashboardService({
     });
   }
 
-  function getDashboardWorkloadSection(query = {}) {
+  async function getDashboardWorkloadSection(query = {}) {
     const key = `workload:${String(query.scorerId || "")}:${String(query.teamId || "")}`;
-    return cachedDashboardValue(key, () => getDashboardWorkloadSummary(query));
+    return cachedDashboardValue(key, async () => await getDashboardWorkloadSummary(query));
   }
 
   function dashboardSummaryMetrics(row) {
@@ -546,8 +540,8 @@ export function createAdminDashboardService({
     };
   }
 
-  function listDashboardScorerOptions() {
-    return db
+  async function listDashboardScorerOptions() {
+    return (await db
       .prepare(
         `SELECT users.id,
                 users.username AS name,
@@ -558,9 +552,9 @@ export function createAdminDashboardService({
           AND rating_tasks.taskVersion = ?
          WHERE users.role = 'scorer'
          GROUP BY users.id, users.username, users.status
-         ORDER BY totalTaskCount DESC, users.username COLLATE NOCASE ASC`,
+         ORDER BY totalTaskCount DESC, LOWER(users.username) ASC, users.username ASC`,
       )
-      .all(taskVersion)
+      .all(taskVersion))
       .map((row) => ({
         id: row.id,
         name: row.name,
@@ -569,8 +563,8 @@ export function createAdminDashboardService({
       }));
   }
 
-  function listDashboardTeamOptions() {
-    return db
+  async function listDashboardTeamOptions() {
+    return (await db
       .prepare(
         `SELECT teams.id,
                 teams.name,
@@ -584,9 +578,9 @@ export function createAdminDashboardService({
          LEFT JOIN rating_tasks ON rating_tasks.scorer = users.username
           AND rating_tasks.taskVersion = ?
          GROUP BY teams.id, teams.name, teams.status
-         ORDER BY totalTaskCount DESC, teams.name COLLATE NOCASE ASC`,
+         ORDER BY totalTaskCount DESC, LOWER(teams.name) ASC, teams.name ASC`,
       )
-      .all(taskVersion)
+      .all(taskVersion))
       .map((row) => ({
         id: row.id,
         name: row.name,
@@ -596,17 +590,17 @@ export function createAdminDashboardService({
       }));
   }
 
-  function resolveDashboardScorerId(query, scorerOptions) {
+  async function resolveDashboardScorerId(query, scorerOptions) {
     const scorerId = String(query.scorerId ?? "").trim();
     if (scorerId) {
-      const user = selectUserByIdStmt.get(scorerId);
+      const user = await selectUserByIdStmt.get(scorerId);
       if (!user || user.role !== "scorer") throw httpError(400, "打分人不存在");
       return user.id;
     }
 
     const scorerName = String(query.scorer ?? "").trim();
     if (scorerName) {
-      const user = selectScorerByUsernameStmt.get(scorerName);
+      const user = await selectScorerByUsernameStmt.get(scorerName);
       if (!user) throw httpError(400, "打分人不存在");
       return user.id;
     }
@@ -614,21 +608,21 @@ export function createAdminDashboardService({
     return scorerOptions.find((item) => item.totalTaskCount > 0)?.id || scorerOptions[0]?.id || null;
   }
 
-  function resolveDashboardTeamId(query, teamOptions) {
+  async function resolveDashboardTeamId(query, teamOptions) {
     const teamId = String(query.teamId ?? "").trim();
     if (teamId) {
-      const team = selectTeamByIdStmt.get(teamId);
+      const team = await selectTeamByIdStmt.get(teamId);
       if (!team) throw httpError(400, "团队不存在");
       return team.id;
     }
     return teamOptions.find((item) => item.totalTaskCount > 0)?.id || teamOptions[0]?.id || null;
   }
 
-  function getDashboardScorerSummary(scorerId) {
+  async function getDashboardScorerSummary(scorerId) {
     if (!scorerId) return null;
-    const user = selectUserByIdStmt.get(scorerId);
+    const user = await selectUserByIdStmt.get(scorerId);
     if (!user || user.role !== "scorer") return null;
-    const totals = db
+    const totals = await db
       .prepare(
         `SELECT COUNT(DISTINCT rating_tasks.projectId) AS projectCount,
                 COUNT(rating_tasks.id) AS totalTaskCount,
@@ -642,7 +636,7 @@ export function createAdminDashboardService({
            AND rating_tasks.scorer = ?`,
       )
       .get(taskVersion, user.username);
-    const projects = db
+    const projects = (await db
       .prepare(
         `SELECT projects.id AS projectId,
                 projects.name AS projectName,
@@ -657,9 +651,9 @@ export function createAdminDashboardService({
          WHERE rating_tasks.taskVersion = ?
            AND rating_tasks.scorer = ?
          GROUP BY projects.id, projects.name, projects.taskStatus
-         ORDER BY completedTaskCount DESC, totalTaskCount DESC, projects.name COLLATE NOCASE ASC`,
+         ORDER BY completedTaskCount DESC, totalTaskCount DESC, LOWER(projects.name) ASC, projects.name ASC`,
       )
-      .all(taskVersion, user.username)
+      .all(taskVersion, user.username))
       .map((row) => {
         const metrics = dashboardSummaryMetrics(row);
         return {
@@ -682,11 +676,11 @@ export function createAdminDashboardService({
     };
   }
 
-  function getDashboardTeamSummary(teamId) {
+  async function getDashboardTeamSummary(teamId) {
     if (!teamId) return null;
-    const team = selectTeamByIdStmt.get(teamId);
+    const team = await selectTeamByIdStmt.get(teamId);
     if (!team) return null;
-    const totals = db
+    const totals = await db
       .prepare(
         `SELECT COUNT(DISTINCT rating_tasks.projectId) AS projectCount,
                 COUNT(rating_tasks.id) AS totalTaskCount,
@@ -702,7 +696,7 @@ export function createAdminDashboardService({
          WHERE user_teams.teamId = ?`,
       )
       .get(taskVersion, team.id);
-    const members = db
+    const members = (await db
       .prepare(
         `SELECT users.id,
                 users.username AS name,
@@ -719,9 +713,9 @@ export function createAdminDashboardService({
           AND rating_tasks.taskVersion = ?
          WHERE user_teams.teamId = ?
          GROUP BY users.id, users.username, users.status
-         ORDER BY totalTaskCount DESC, completedTaskCount DESC, users.username COLLATE NOCASE ASC`,
+         ORDER BY totalTaskCount DESC, completedTaskCount DESC, LOWER(users.username) ASC, users.username ASC`,
       )
-      .all(taskVersion, team.id)
+      .all(taskVersion, team.id))
       .map((row) => ({
         id: row.id,
         name: row.name,
@@ -738,35 +732,35 @@ export function createAdminDashboardService({
     };
   }
 
-  function getDashboardWorkloadSummary(query = {}) {
-    const scorers = listDashboardScorerOptions();
-    const teams = listDashboardTeamOptions();
-    const selectedScorerId = resolveDashboardScorerId(query, scorers);
-    const selectedTeamId = resolveDashboardTeamId(query, teams);
+  async function getDashboardWorkloadSummary(query = {}) {
+    const scorers = await listDashboardScorerOptions();
+    const teams = await listDashboardTeamOptions();
+    const selectedScorerId = await resolveDashboardScorerId(query, scorers);
+    const selectedTeamId = await resolveDashboardTeamId(query, teams);
     return {
       selectedScorerId,
       selectedTeamId,
       scorers,
       teams,
-      scorer: getDashboardScorerSummary(selectedScorerId),
-      team: getDashboardTeamSummary(selectedTeamId),
+      scorer: await getDashboardScorerSummary(selectedScorerId),
+      team: await getDashboardTeamSummary(selectedTeamId),
     };
   }
 
-  function listAdminDashboard(query = {}) {
+  async function listAdminDashboard(query = {}) {
     const { page, pageSize } = parseTaskPagination(query);
-    const stats = getDashboardStats();
-    const projectSection = getDashboardProjectSection(query);
-    const charts = getDashboardCharts();
-    const averageDuration = getDashboardAverageDuration();
-    const workloadSummary = getDashboardWorkloadSection(query);
+    const stats = await getDashboardStats();
+    const projectSection = await getDashboardProjectSection(query);
+    const charts = await getDashboardCharts();
+    const averageDuration = await getDashboardAverageDuration();
+    const workloadSummary = await getDashboardWorkloadSection(query);
 
     return {
       ...stats,
       ...projectSection,
       peakHours: charts.peakHours,
       averageDurationSeconds: averageDuration.averageDurationSeconds,
-      progressSummary: getDashboardProgressSummary(),
+      progressSummary: await getDashboardProgressSummary(),
       workloadSummary,
       total: stats.completedTaskCount,
       page,
@@ -775,8 +769,8 @@ export function createAdminDashboardService({
     };
   }
 
-  function listTeamTaskSummaryRows(teamIds) {
-    return db
+  async function listTeamTaskSummaryRows(teamIds) {
+    return (await db
       .prepare(
         `SELECT teams.id AS teamId,
                 teams.name AS teamName,
@@ -797,9 +791,9 @@ export function createAdminDashboardService({
           )
          WHERE teams.id IN (${placeholders(teamIds.length)})
          GROUP BY teams.id, teams.name, users.id, users.username
-         ORDER BY teams.name COLLATE NOCASE ASC, users.username COLLATE NOCASE ASC`,
+         ORDER BY LOWER(teams.name) ASC, teams.name ASC, LOWER(users.username) ASC, users.username ASC`,
       )
-      .all(taskVersion, ...teamIds)
+      .all(taskVersion, ...teamIds))
       .map((row) => {
         const totalTaskCount = Number(row.totalTaskCount || 0);
         const completedTaskCount = Number(row.completedTaskCount || 0);
@@ -816,7 +810,7 @@ export function createAdminDashboardService({
       });
   }
 
-  function listTeamSummaryExportTeams(teamIds, rows) {
+  async function listTeamSummaryExportTeams(teamIds, rows) {
     const rowsByTeamId = new Map();
     rows.forEach((row) => {
       const items = rowsByTeamId.get(row.teamId) || [];
@@ -829,14 +823,14 @@ export function createAdminDashboardService({
       });
       rowsByTeamId.set(row.teamId, items);
     });
-    return db
+    return (await db
       .prepare(
         `SELECT id AS teamId, name AS teamName
          FROM teams
          WHERE id IN (${placeholders(teamIds.length)})
-         ORDER BY name COLLATE NOCASE ASC`,
+         ORDER BY LOWER(name) ASC, name ASC`,
       )
-      .all(...teamIds)
+      .all(...teamIds))
       .map((team) => ({
         teamId: team.teamId,
         teamName: team.teamName,
@@ -845,10 +839,10 @@ export function createAdminDashboardService({
   }
 
   async function exportCompletedTasks(req, res) {
-    const projectIds = parseDashboardProjectIds(req.query);
+    const projectIds = await parseDashboardProjectIds(req.query);
     const filters = { projectIds };
-    const taskCount = countCompletedTasks(filters);
-    const projects = listCompletedExportProjects(filters);
+    const taskCount = await countCompletedTasks(filters);
+    const projects = await listCompletedExportProjects(filters);
     const jsonFilename = `completed-tasks-${new Date()
       .toISOString()
       .replace(/[:.]/g, "-")}.json`;
@@ -866,8 +860,8 @@ export function createAdminDashboardService({
     const batchSize = 200;
     let written = 0;
     for (let offset = 0; offset < taskCount; offset += batchSize) {
-      const rows = listCompletedTaskRows(filters, batchSize, offset);
-      const tasks = hydrateTaskRows(rows);
+      const rows = await listCompletedTaskRows(filters, batchSize, offset);
+      const tasks = await hydrateTaskRows(rows);
       for (const task of tasks) {
         await writeResponseChunk(
           res,
@@ -880,13 +874,13 @@ export function createAdminDashboardService({
   }
 
   async function exportScorerTaskSummary(req, res) {
-    const scorerIds = parseDashboardScorerIds(req.query);
-    const scorerUsers = listDashboardScorerExportUsers(scorerIds);
+    const scorerIds = await parseDashboardScorerIds(req.query);
+    const scorerUsers = await listDashboardScorerExportUsers(scorerIds);
     const scorerNames = scorerUsers.map((user) => user.username);
     const filters = { scorerNames };
-    const taskCount = countCompletedTasks(filters);
-    const projects = listCompletedExportProjects(filters);
-    const scorers = listCompletedExportScorers(filters);
+    const taskCount = await countCompletedTasks(filters);
+    const projects = await listCompletedExportProjects(filters);
+    const scorers = await listCompletedExportScorers(filters);
     const jsonFilename = `scorer-completed-tasks-${new Date()
       .toISOString()
       .replace(/[:.]/g, "-")}.json`;
@@ -904,8 +898,8 @@ export function createAdminDashboardService({
     const batchSize = 200;
     let written = 0;
     for (let offset = 0; offset < taskCount; offset += batchSize) {
-      const rows = listCompletedTaskRows(filters, batchSize, offset);
-      const tasks = hydrateTaskRows(rows);
+      const rows = await listCompletedTaskRows(filters, batchSize, offset);
+      const tasks = await hydrateTaskRows(rows);
       for (const task of tasks) {
         await writeResponseChunk(
           res,
@@ -917,10 +911,10 @@ export function createAdminDashboardService({
     res.end("]}");
   }
 
-  function exportTeamTaskSummary(req, res) {
-    const teamIds = parseTeamSummaryExportIds(req.query);
-    const rows = listTeamTaskSummaryRows(teamIds);
-    const teams = listTeamSummaryExportTeams(teamIds, rows);
+  async function exportTeamTaskSummary(req, res) {
+    const teamIds = await parseTeamSummaryExportIds(req.query);
+    const rows = await listTeamTaskSummaryRows(teamIds);
+    const teams = await listTeamSummaryExportTeams(teamIds, rows);
     const distinctScorers = new Set(rows.map((row) => row.scorer));
     const jsonFilename = `team-task-summary-${new Date()
       .toISOString()

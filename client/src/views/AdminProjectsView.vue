@@ -6,6 +6,7 @@ import { authApi } from '../services/auth';
 import { imageApi, type TaskAllocationImportResult } from '../services/images';
 import { useTaskStackStore } from '../stores/taskStack';
 import type { ProjectItem, SubjectItem } from '../types/image';
+import { formatDateTime } from '../utils/time';
 
 type AllocationImportFeedback = {
   filename: string;
@@ -569,7 +570,7 @@ const columns: DataTableColumns<ProjectItem> = [
       : [h('span', { class: 'table-muted' }, '未配置')])
   },
   { title: '任务状态', key: 'taskStatus', width: 180, render: renderStatus },
-  { title: '创建时间', key: 'createdAt', width: 180, render: row => new Date(row.createdAt).toLocaleString() },
+  { title: '创建时间', key: 'createdAt', width: 180, render: row => formatDateTime(row.createdAt) },
   {
     title: '功能', key: 'actions', fixed: 'right', width: 220,
     render: row => h('div', { class: 'table-actions' }, [

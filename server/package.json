@@ -5,7 +5,8 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "import:local": "node src/import-local.js",
-    "thumbnails:backfill": "node src/backfill-thumbnails.js"
+    "thumbnails:backfill": "node src/backfill-thumbnails.js",
+    "migrate:sqlite": "node src/migrate-sqlite-to-postgres.js"
   },
   "dependencies": {
     "adm-zip": "^0.5.16",
@@ -16,6 +17,7 @@
     "iconv-lite": "^0.4.24",
     "image-rating-platform": "file:..",
     "multer": "^1.4.5-lts.1",
+    "pg": "^8.16.3",
     "sharp": "^0.35.3",
     "yauzl": "^3.4.0"
   }

@@ -331,6 +331,7 @@ export const imageApi = {
     page?: number;
     pageSize?: number;
     cursor?: string | null;
+    includeTotal?: boolean;
     scorer?: string | null;
     projectId?: string | null;
     submissionMode?: TaskSubmissionModeFilter | null;
@@ -341,6 +342,7 @@ export const imageApi = {
     if (query.page) params.set('page', String(query.page));
     if (query.pageSize) params.set('pageSize', String(query.pageSize));
     if (query.cursor) params.set('cursor', query.cursor);
+    if (query.includeTotal) params.set('includeTotal', '1');
     if (query.scorer) params.set('scorer', query.scorer);
     if (query.projectId) params.set('projectId', query.projectId);
     if (query.submissionMode) params.set('submissionMode', query.submissionMode);
@@ -470,6 +472,7 @@ export const imageApi = {
     page?: number;
     pageSize?: number;
     cursor?: string | null;
+    includeTotal?: boolean;
     status?: RatingTask['status'] | null;
     scorer?: string | null;
     criterion?: RatingTask['criterion'] | null;
@@ -478,6 +481,7 @@ export const imageApi = {
     if (query.page) params.set('page', String(query.page));
     if (query.pageSize) params.set('pageSize', String(query.pageSize));
     if (query.cursor) params.set('cursor', query.cursor);
+    if (query.includeTotal) params.set('includeTotal', '1');
     if (query.status) params.set('status', query.status);
     if (query.scorer) params.set('scorer', query.scorer);
     if (query.criterion) params.set('criterion', query.criterion);
@@ -511,6 +515,7 @@ export const imageApi = {
     page?: number;
     pageSize?: number;
     cursor?: string | null;
+    includeTotal?: boolean;
     status?: 'assigned' | 'completed' | null;
     criterion?: RatingTask['criterion'] | null;
     summaryOnly?: boolean;
@@ -522,6 +527,7 @@ export const imageApi = {
     if (query.page) params.set('page', String(query.page));
     if (query.pageSize) params.set('pageSize', String(query.pageSize));
     if (query.cursor) params.set('cursor', query.cursor);
+    if (query.includeTotal) params.set('includeTotal', '1');
     if (query.status) params.set('status', query.status);
     if (query.criterion) params.set('criterion', query.criterion);
     if (query.summaryOnly) params.set('summaryOnly', '1');

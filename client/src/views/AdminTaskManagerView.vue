@@ -4,6 +4,7 @@ import { NButton, NTag, useMessage, type DataTableColumns } from 'naive-ui';
 import { useRouter } from 'vue-router';
 import { imageApi } from '../services/images';
 import type { ProjectItem } from '../types/image';
+import { formatDateTime } from '../utils/time';
 
 const router = useRouter();
 const message = useMessage();
@@ -51,7 +52,7 @@ const columns: DataTableColumns<ProjectItem> = [
       default: () => taskStatusLabel(row.taskStatus)
     })
   },
-  { title: '更新时间', key: 'updatedAt', width: 180, render: row => new Date(row.updatedAt).toLocaleString() },
+  { title: '更新时间', key: 'updatedAt', width: 180, render: row => formatDateTime(row.updatedAt) },
   {
     title: '操作',
     key: 'actions',

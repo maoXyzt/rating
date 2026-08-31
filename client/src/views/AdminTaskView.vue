@@ -6,6 +6,7 @@ import { imageApi } from '../services/images';
 import { taskCriteria } from '../constants/scoreCriteria';
 import { useTaskStackStore } from '../stores/taskStack';
 import type { AdminTaskListItem, ProjectItem, RankingRelation, RatingTask, RatingTaskItem, SubjectItem, SubjectTaskReport } from '../types/image';
+import { formatDateTime as formatBusinessDateTime } from '../utils/time';
 
 const route = useRoute();
 const router = useRouter();
@@ -19,8 +20,6 @@ const loading = ref(false);
 const taskPage = ref(1);
 const taskPageSize = ref(10);
 const taskTotal = ref(0);
-const taskHasMore = ref(false);
-const taskCursors = ref<Record<number, string | null>>({ 1: null });
 const taskScorers = ref<string[]>([]);
 const detailTask = ref<RatingTask | null>(null);
 const detailVisible = ref(false);
@@ -150,7 +149,7 @@ function detailCorrectnessStateLabel(state: string) {
 }
 
 function formatDateTime(value: string | null | undefined) {
-  return value ? new Date(value).toLocaleString() : '未记录';
+  return value ? formatBusinessDateTime(value) : '未记录';
 }
 
 function formatDuration(value: number | null | undefined) {
@@ -421,7 +420,7 @@ const columns: DataTableColumns<AdminTaskListItem> = [
   },
   { title: '打分人', key: 'scorer', width: 110, render: row => row.scorer || '未分配' },
 
-  { title: '创建时间', key: 'createdAt', width: 180, render: row => new Date(row.createdAt).toLocaleString() },
+  { title: '创建时间', key: 'createdAt', width: 180, render: row => formatBusinessDateTime(row.createdAt) },
   {
     title: '操作',
     key: 'actions',
@@ -440,19 +439,16 @@ const columns: DataTableColumns<AdminTaskListItem> = [
 async function loadTasks(page = taskPage.value, pageSize = taskPageSize.value) {
   loading.value = true;
   try {
-    if (page === 1) taskCursors.value = { 1: null };
     const result = await imageApi.projectTasks(projectId, {
       page,
       pageSize,
-      cursor: taskCursors.value[page] || null,
+      includeTotal: true,
       ...taskFilters
     });
     subject.value = result.subject;
     project.value = result.project;
     tasks.value = result.tasks;
     taskTotal.value = result.total ?? 0;
-    taskHasMore.value = result.hasMore;
-    if (result.nextCursor) taskCursors.value[page + 1] = result.nextCursor;
     taskPage.value = result.page;
     taskPageSize.value = result.pageSize;
   } catch (error) {
@@ -531,8 +527,8 @@ onMounted(() => {
         <div v-else class="empty">{{ loading ? '正在加载任务...' : '暂无任务' }}</div>
       </div>
       <div class="task-table-footer">
-        <n-pagination v-if="taskHasMore || taskPage > 1" :page="taskPage" :page-size="taskPageSize"
-          :page-count="taskPage + (taskHasMore ? 1 : 0)" show-size-picker
+        <n-pagination v-if="taskTotal > 0" :page="taskPage" :page-size="taskPageSize"
+          :page-count="Math.ceil(taskTotal / taskPageSize)" show-size-picker
           :page-sizes="[10, 20, 50, 100]" :prefix="taskPaginationPrefix" @update:page="changeTaskPage"
           @update:page-size="changeTaskPageSize" />
       </div>

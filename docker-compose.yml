@@ -1,17 +1,49 @@
 services:
+  postgres:
+    image: postgres:18-trixie
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-image_rating}
+      # The official image creates POSTGRES_USER as a superuser on init.
+      POSTGRES_USER: image_rating
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - ${RATING_DATA_DIR:-/data/sunwenxiu/rating}/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
   api:
     build:
       context: .
       dockerfile: server/Dockerfile
     restart: unless-stopped
     environment:
-      PORT: 3000
-      DB_PATH: /app/data/image-rating.sqlite
+      PORT: ${PORT:-3000}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://image_rating:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-image_rating}}
       UPLOAD_DIR: /app/uploads
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+      MAX_ZIP_BYTES: ${MAX_ZIP_BYTES:-}
+      MAX_ARCHIVE_ENTRIES: ${MAX_ARCHIVE_ENTRIES:-}
+      MAX_ARCHIVE_UNCOMPRESSED_BYTES: ${MAX_ARCHIVE_UNCOMPRESSED_BYTES:-}
+      MAX_IMAGE_UNCOMPRESSED_BYTES: ${MAX_IMAGE_UNCOMPRESSED_BYTES:-}
+      MAX_CHUNK_COUNT: ${MAX_CHUNK_COUNT:-}
+      IMAGE_IMPORT_CONCURRENCY: ${IMAGE_IMPORT_CONCURRENCY:-}
+      IMAGE_THUMBNAIL_SIZE: ${IMAGE_THUMBNAIL_SIZE:-}
+      IMAGE_THUMBNAIL_QUALITY: ${IMAGE_THUMBNAIL_QUALITY:-}
+      IMAGE_THUMBNAIL_EFFORT: ${IMAGE_THUMBNAIL_EFFORT:-}
+      PG_POOL_MAX: ${PG_POOL_MAX:-24}
+      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-15000}
+      PG_LOCK_TIMEOUT_MS: ${PG_LOCK_TIMEOUT_MS:-2000}
     volumes:
-      - /data/sunwenxiu/rating/sqlite:/app/data
-      - /data/sunwenxiu/rating/uploads:/app/uploads
-      - /data/sunwenxiu/rating/inbox:/app/inbox
+      - ${RATING_DATA_DIR:-/data/sunwenxiu/rating}/uploads:/app/uploads
+      - ${RATING_DATA_DIR:-/data/sunwenxiu/rating}/inbox:/app/inbox
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   web:
     build:
@@ -21,11 +53,12 @@ services:
     ports:
       - "${WEB_PORT:-8080}:80"
     depends_on:
-      - api
+      api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
       interval: 10s
       timeout: 3s
       retries: 3
-
-volumes: {}

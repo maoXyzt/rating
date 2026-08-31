@@ -4,6 +4,7 @@ import { NButton, NTag, useDialog, useMessage, type DataTableColumns } from 'nai
 import BulkNameTagEditor from '../components/BulkNameTagEditor.vue';
 import { authApi } from '../services/auth';
 import type { AuthUser, AvailabilityStatus } from '../types/auth';
+import { formatDateTime, shanghaiDateToUtc } from '../utils/time';
 
 const dialog = useDialog();
 const message = useMessage();
@@ -23,7 +24,7 @@ const userPageSize = ref(10);
 const filters = reactive({
   username: '',
   teamId: null as string | null,
-  lastLoginRange: null as [number, number] | null
+  lastLoginRange: null as [string, string] | null
 });
 const createForm = reactive({
   username: '',
@@ -52,8 +53,8 @@ function loginRangeQuery() {
   if (!filters.lastLoginRange) return {};
   const [start, end] = filters.lastLoginRange;
   return {
-    lastLoginStart: new Date(start).toISOString(),
-    lastLoginEnd: new Date(end + 24 * 60 * 60 * 1000 - 1).toISOString()
+    lastLoginStart: shanghaiDateToUtc(start),
+    lastLoginEnd: shanghaiDateToUtc(end, 1)
   };
 }
 
@@ -285,8 +286,8 @@ const columns: DataTableColumns<AuthUser> = [
     width: 160,
     render: () => h(NTag, { size: 'small', type: 'info' }, { default: () => '打分人' })
   },
-  { title: '最后登录', key: 'lastLoginAt', width: 180, render: row => row.lastLoginAt ? new Date(row.lastLoginAt).toLocaleString() : '未登录' },
-  { title: '创建时间', key: 'createdAt', width: 180, render: row => row.createdAt ? new Date(row.createdAt).toLocaleString() : '-' },
+  { title: '最后登录', key: 'lastLoginAt', width: 180, render: row => row.lastLoginAt ? formatDateTime(row.lastLoginAt) : '未登录' },
+  { title: '创建时间', key: 'createdAt', width: 180, render: row => row.createdAt ? formatDateTime(row.createdAt) : '-' },
   {
     title: '操作',
     key: 'actions',
@@ -337,7 +338,7 @@ onMounted(() => void initialize());
       <div class="account-filter-bar">
         <n-input v-model:value="filters.username" clearable placeholder="按名称筛选" @keyup.enter="applyFilters" />
         <n-select v-model:value="filters.teamId" clearable filterable :options="teamFilterOptions" placeholder="按团队筛选" />
-        <n-date-picker v-model:value="filters.lastLoginRange" type="daterange" clearable placeholder="按最后登录日期筛选" />
+        <n-date-picker v-model:value="filters.lastLoginRange" type="daterange" value-format="yyyy-MM-dd" clearable placeholder="按最后登录日期筛选" />
         <div class="account-filter-actions">
           <n-button type="primary" @click="applyFilters">查询</n-button>
           <n-button :disabled="!hasFilters" @click="resetFilters">重置</n-button>

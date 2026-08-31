@@ -1,13 +1,15 @@
 # 图片评分平台部署流程
 
-这份文档用于把当前项目部署到服务器。项目已经切换为 SQLite，不需要安装 MongoDB。
+这份文档用于把当前项目部署到服务器。数据库使用同一 Compose 中的 `postgres:18-trixie` 容器。
 
 ## 1. 部署架构
 
 - `web`：前端静态页面，运行在 Nginx 容器里，对外暴露 `8080` 端口。
 - `api`：Node.js / Express 服务，处理 ZIP 分片上传、图片解析、评分保存。
-- `sqlite_data`：Docker volume，保存 SQLite 数据库。
-- `image_uploads`：Docker volume，保存解压后的图片文件。
+- `postgres`：`postgres:18-trixie` 数据库容器。
+- `${RATING_DATA_DIR}/postgres`：保存 PostgreSQL 数据。
+- `${RATING_DATA_DIR}/uploads`：保存解压后的图片文件。
+- `${RATING_DATA_DIR}/inbox`：保存导入中的文件。
 
 默认访问地址：
 
@@ -47,14 +49,20 @@ cd image-rating-platform
 
 如果没有 Git 仓库，也可以把项目压缩包上传到 `/opt` 后解压，进入项目根目录即可。
 
-首次启动：
+首次启动（会同时创建 PostgreSQL 和 API；正式切换前先停 API）：
 
 ```bash
-# 默认使用 8080；如果外部访问端口是 8001：
-WEB_PORT=8001 docker compose up --build -d
+cp -n .env.example .env
+# 编辑 .env，将 POSTGRES_PASSWORD 改成实际密码
+
+# 先只启动数据库，避免迁移期间产生写入
+docker compose up -d postgres
+docker compose stop api web
+
+# 默认使用 8080；如果外部访问端口是 8001，可加 WEB_PORT=8001
 ```
 
-查看容器状态：
+完成第 8 节迁移后执行 `docker compose up --build -d` 启动 API/web，再查看容器状态：
 
 ```bash
 docker compose ps
@@ -96,39 +104,37 @@ git pull
 docker compose up --build -d
 ```
 
-注意：不要随意执行 `docker compose down -v`，它会删除 SQLite 数据和上传图片对应的 Docker volume。
+注意：不要删除 `${RATING_DATA_DIR}/postgres` 或 `${RATING_DATA_DIR}/uploads`，这些目录保存数据库和上传图片。
 
 ## 5. 数据持久化位置
 
-Docker 部署时，数据不会写在项目源码目录里，而是写入 Docker volume：
+Docker 部署时，数据不会写在项目源码目录里，而是写入宿主机目录：
 
-- SQLite 数据库：`sqlite_data`
-- 上传图片：`image_uploads`
+- PostgreSQL 数据库：`${RATING_DATA_DIR}/postgres`
+- 上传图片：`${RATING_DATA_DIR}/uploads`
+- 导入文件：`${RATING_DATA_DIR}/inbox`
 
-查看实际 volume 名称：
+查看目录占用情况：
 
 ```bash
-docker volume ls | grep sqlite_data
-docker volume ls | grep image_uploads
+set -a
+. ./.env
+set +a
+du -sh "$RATING_DATA_DIR/postgres"
+du -sh "$RATING_DATA_DIR/uploads"
 ```
-
-Compose 会根据项目目录名给 volume 加前缀，例如 `image-rating-platform_sqlite_data`。
 
 ## 6. 备份数据
 
-SQLite 处于 WAL 模式。备份数据库前先停止 API，保证数据库文件和 WAL 状态一致；图片 volume 可以在 API 停止期间一并备份。
+使用 `pg_dump` 备份 PostgreSQL；图片目录单独备份。
 
 在项目根目录执行：
 
 ```bash
 mkdir -p backups
-docker compose stop api
-docker run --rm -v image-rating-platform_sqlite_data:/data -v "$PWD/backups:/backup" alpine tar czf /backup/sqlite_data_$(date +%Y%m%d_%H%M%S).tgz -C /data .
-docker run --rm -v image-rating-platform_image_uploads:/data -v "$PWD/backups:/backup" alpine tar czf /backup/image_uploads_$(date +%Y%m%d_%H%M%S).tgz -C /data .
-docker compose start api
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' > backups/postgres_$(date +%Y%m%d_%H%M%S).sql
+tar czf backups/image_uploads_$(date +%Y%m%d_%H%M%S).tgz -C "$RATING_DATA_DIR/uploads" .
 ```
-
-如果你的 volume 前缀不同，把命令里的 `image-rating-platform_sqlite_data` 和 `image-rating-platform_image_uploads` 替换成 `docker volume ls` 看到的实际名称。
 
 ## 7. 恢复数据
 
@@ -138,16 +144,23 @@ docker compose start api
 docker compose down
 ```
 
-恢复 SQLite volume：
+启动 PostgreSQL（恢复前必须先启动数据库容器）：
 
 ```bash
-docker run --rm -v image-rating-platform_sqlite_data:/data -v "$PWD/backups:/backup" alpine sh -c "rm -rf /data/* && tar xzf /backup/你的_sqlite_备份文件.tgz -C /data"
+docker compose up -d postgres
 ```
 
-恢复图片 volume：
+恢复 PostgreSQL：
 
 ```bash
-docker run --rm -v image-rating-platform_image_uploads:/data -v "$PWD/backups:/backup" alpine sh -c "rm -rf /data/* && tar xzf /backup/你的_uploads_备份文件.tgz -C /data"
+cat backups/你的_postgres_备份文件.sql | docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+```
+
+恢复图片目录：
+
+```bash
+find "$RATING_DATA_DIR/uploads" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+tar xzf backups/你的_uploads_备份文件.tgz -C "$RATING_DATA_DIR/uploads"
 ```
 
 恢复后启动：
@@ -156,7 +169,28 @@ docker run --rm -v image-rating-platform_image_uploads:/data -v "$PWD/backups:/b
 docker compose up -d
 ```
 
-## 8. 域名和 HTTPS
+## 8. SQLite 首次迁移与正式启用
+
+迁移前先备份 SQLite 文件和上传图片，并停止 API 写入。数据库容器健康后，在项目根目录执行（把旧 SQLite 文件只读挂载到临时 API 容器）：
+
+```bash
+docker compose run --rm \
+  -v /path/to/image-rating.sqlite:/migration/image-rating.sqlite:ro \
+  -e SQLITE_PATH=/migration/image-rating.sqlite \
+  api npm run migrate:sqlite
+```
+
+迁移脚本会创建表、索引和统计触发器，导入完成后执行 `ANALYZE`；失败会回滚 PostgreSQL 事务。导入后抽查各表行数，再正式启动：
+
+```bash
+docker compose up --build -d
+docker compose ps
+docker compose logs --tail=100 api
+```
+
+确认登录、项目列表、任务分配和评分写入均正常后，PostgreSQL 即为唯一运行库。保留 SQLite 备份一段观察期，回滚时停止新 API 并恢复旧版本/SQLite。
+
+## 9. 域名和 HTTPS
 
 如果你希望使用域名访问，建议让本项目继续监听 `8080`，在服务器宿主机 Nginx 上反向代理到 `127.0.0.1:8080`。
 
@@ -189,17 +223,24 @@ apt install -y certbot python3-certbot-nginx
 certbot --nginx -d your.domain.com
 ```
 
-## 9. 环境变量
+## 10. 环境变量
 
-`docker-compose.yml` 里已经配置了默认值：
+API 已只使用 PostgreSQL；不要再设置 `DB_PATH` 或挂载 SQLite 数据目录：
 
 ```yaml
 PORT: 3000
-DB_PATH: /app/data/image-rating.sqlite
+DATABASE_URL: postgresql://用户名:密码@postgres:5432/数据库名
 UPLOAD_DIR: /app/uploads
+PG_POOL_MAX: 24
+PG_STATEMENT_TIMEOUT_MS: 15000
+PG_LOCK_TIMEOUT_MS: 2000
 ```
 
-通常不需要修改。只有在你要改变容器内部存储路径或端口时才需要调整。
+`POSTGRES_PASSWORD` 必须通过 `.env` 或部署环境设置；不要提交到仓库。
+
+`RATING_DATA_DIR` 用于配置宿主机数据根目录，默认值为 `/data/sunwenxiu/rating`；修改 `.env` 后重新执行 `docker compose up` 即可生效。需要在宿主机执行备份或恢复命令时，先按第 5 节加载该变量。
+
+按约 100 人同时使用的单 API 实例，以上连接配置最多约 24 条 PostgreSQL 连接。PostgreSQL 的 `statement_timeout` 限制单条 SQL 执行时间；连接池负责短时排队。若压测显示慢查询会造成大量等待，应优先优化 SQL/索引，再考虑继续增加连接数。
 
 可选的安全和上传限制配置：
 
@@ -213,7 +254,7 @@ MAX_IMAGE_UNCOMPRESSED_BYTES: 134217728
 
 启用 `COOKIE_SECURE` 后，请确保浏览器始终通过 HTTPS 访问站点，否则登录 Cookie 不会被发送。
 
-## 10. 常见问题
+## 11. 常见问题
 
 上传 ZIP 报 `413 Request Entity Too Large`：
 
@@ -227,17 +268,16 @@ MAX_IMAGE_UNCOMPRESSED_BYTES: 134217728
 
 重新部署后数据不见了：
 
-- 检查是否误用了 `docker compose down -v`。
-- 检查当前目录名是否变化，Compose 项目名变化会导致 volume 前缀变化。
+- 检查 `$RATING_DATA_DIR/postgres` 是否仍然存在且有数据。
 
 上传成功但图片不可访问：
 
 - 执行 `docker compose logs -f api` 查看解压和文件保存日志。
-- 确认 `image_uploads` volume 正常挂载。
+- 确认 `$RATING_DATA_DIR/uploads` 正常挂载。
 
-## 11. 本地开发启动
+## 12. 本地开发启动
 
-本地开发不需要 MongoDB，SQLite 会自动创建。
+本地开发通过 Compose 启动 PostgreSQL。
 
 ```bash
 npm run install:all

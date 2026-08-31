@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { db } from "./sqlite.js";
+import { db } from "./postgres.js";
 import {
   createThumbnail,
   thumbnailStoragePath,
@@ -10,7 +10,7 @@ import {
 const uploadDir = path.resolve(process.env.UPLOAD_DIR || "uploads");
 const limitArgument = process.argv.find((argument) => argument.startsWith("--limit="));
 const limit = Number.parseInt(limitArgument?.slice("--limit=".length) || "0", 10);
-const rows = db
+const rows = await db
   .prepare(
     `SELECT id, storagePath
      FROM images
@@ -39,7 +39,7 @@ for (const [index, row] of rows.entries()) {
       await createThumbnail(originalPath, targetPath);
       generated += 1;
     }
-    updateThumbnailPathStmt.run(thumbnailPath, row.id);
+    await updateThumbnailPathStmt.run(thumbnailPath, row.id);
   } catch (error) {
     failed += 1;
     console.error(`缩略图生成失败 [${row.id}]`, error?.message || error);
