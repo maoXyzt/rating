@@ -645,19 +645,20 @@ const selectAssignedTaskCountStmt = db.prepare(`
 `);
 const selectScorerTaskStatsStmt = db.prepare(`
   SELECT
-    SUM(CASE WHEN status = 'assigned' THEN 1 ELSE 0 END) AS pendingTasks,
-    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completedTasks
-  FROM rating_tasks
+    COALESCE(SUM(assigned), 0) AS pendingTasks,
+    COALESCE(SUM(completed), 0) AS completedTasks
+  FROM scorer_task_stats
   WHERE taskVersion = ?
     AND scorer = ?
     AND (? IS NULL OR projectId = ?)
 `);
 const selectScorerProjectCountStmt = db.prepare(`
-  SELECT COUNT(DISTINCT projectId) AS total
-  FROM rating_tasks
+  SELECT COUNT(*) AS total
+  FROM scorer_task_stats
   WHERE taskVersion = ?
     AND scorer = ?
-    AND status IN ('assigned', 'completed')
+    AND projectId <> ''
+    AND (assigned + completed) > 0
 `);
 const selectTaskByIdStmt = db.prepare(`
   SELECT id, subjectId, projectId, taskVersion, taskType, status, scorer, ranking, excludedImageIds, correctImageIds, rankingRelations,

@@ -332,6 +332,16 @@ db.exec(`
     FOREIGN KEY (projectId) REFERENCES projects(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS scorer_task_stats (
+    scorer TEXT NOT NULL,
+    taskVersion TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    assigned INTEGER NOT NULL DEFAULT 0,
+    completed INTEGER NOT NULL DEFAULT 0,
+    updatedAt TEXT NOT NULL,
+    PRIMARY KEY (scorer, taskVersion, projectId)
+  );
+
   -- A ZIP package owns immutable task definitions. Projects copy these
   -- definitions into rating_tasks when work starts, then assign them to users.
   CREATE TABLE IF NOT EXISTS subject_task_templates (
@@ -428,6 +438,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_feedbacks_submitter_status_created ON feedbacks(submitter, status, submittedAt DESC);
   CREATE INDEX IF NOT EXISTS idx_feedbacks_status_created ON feedbacks(status, submittedAt DESC);
   CREATE INDEX IF NOT EXISTS idx_feedback_messages_feedback_created ON feedback_messages(feedbackId, createdAt ASC, id ASC);
+  CREATE INDEX IF NOT EXISTS idx_scorer_task_stats_project_version
+    ON scorer_task_stats(projectId, taskVersion);
 
   CREATE TRIGGER IF NOT EXISTS trg_rating_tasks_stats_insert
   AFTER INSERT ON rating_tasks
@@ -496,6 +508,96 @@ db.exec(`
       pending = project_task_stats.pending + excluded.pending,
       assigned = project_task_stats.assigned + excluded.assigned,
       completed = project_task_stats.completed + excluded.completed,
+      updatedAt = excluded.updatedAt;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_rating_tasks_scorer_stats_insert
+  AFTER INSERT ON rating_tasks
+  WHEN NEW.scorer IS NOT NULL
+    AND TRIM(NEW.scorer) <> ''
+    AND NEW.status IN ('assigned', 'completed')
+  BEGIN
+    INSERT INTO scorer_task_stats (
+      scorer, taskVersion, projectId, assigned, completed, updatedAt
+    ) VALUES (
+      NEW.scorer,
+      NEW.taskVersion,
+      COALESCE(NEW.projectId, ''),
+      CASE WHEN NEW.status = 'assigned' THEN 1 ELSE 0 END,
+      CASE WHEN NEW.status = 'completed' THEN 1 ELSE 0 END,
+      NEW.updatedAt
+    )
+    ON CONFLICT(scorer, taskVersion, projectId) DO UPDATE SET
+      assigned = scorer_task_stats.assigned + excluded.assigned,
+      completed = scorer_task_stats.completed + excluded.completed,
+      updatedAt = excluded.updatedAt;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_rating_tasks_scorer_stats_delete
+  AFTER DELETE ON rating_tasks
+  WHEN OLD.scorer IS NOT NULL
+    AND TRIM(OLD.scorer) <> ''
+    AND OLD.status IN ('assigned', 'completed')
+  BEGIN
+    UPDATE scorer_task_stats
+    SET assigned = MAX(0, assigned - CASE WHEN OLD.status = 'assigned' THEN 1 ELSE 0 END),
+        completed = MAX(0, completed - CASE WHEN OLD.status = 'completed' THEN 1 ELSE 0 END),
+        updatedAt = OLD.updatedAt
+    WHERE scorer = OLD.scorer
+      AND taskVersion = OLD.taskVersion
+      AND projectId = COALESCE(OLD.projectId, '');
+
+    DELETE FROM scorer_task_stats
+    WHERE scorer = OLD.scorer
+      AND taskVersion = OLD.taskVersion
+      AND projectId = COALESCE(OLD.projectId, '')
+      AND assigned = 0
+      AND completed = 0;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_rating_tasks_scorer_stats_update
+  AFTER UPDATE OF projectId, taskVersion, status, scorer ON rating_tasks
+  WHEN COALESCE(OLD.projectId, '') <> COALESCE(NEW.projectId, '')
+    OR OLD.taskVersion <> NEW.taskVersion
+    OR OLD.status <> NEW.status
+    OR COALESCE(OLD.scorer, '') <> COALESCE(NEW.scorer, '')
+  BEGIN
+    UPDATE scorer_task_stats
+    SET assigned = MAX(0, assigned - CASE WHEN OLD.status = 'assigned' THEN 1 ELSE 0 END),
+        completed = MAX(0, completed - CASE WHEN OLD.status = 'completed' THEN 1 ELSE 0 END),
+        updatedAt = NEW.updatedAt
+    WHERE OLD.scorer IS NOT NULL
+      AND TRIM(OLD.scorer) <> ''
+      AND OLD.status IN ('assigned', 'completed')
+      AND scorer = OLD.scorer
+      AND taskVersion = OLD.taskVersion
+      AND projectId = COALESCE(OLD.projectId, '');
+
+    DELETE FROM scorer_task_stats
+    WHERE OLD.scorer IS NOT NULL
+      AND TRIM(OLD.scorer) <> ''
+      AND scorer = OLD.scorer
+      AND taskVersion = OLD.taskVersion
+      AND projectId = COALESCE(OLD.projectId, '')
+      AND assigned = 0
+      AND completed = 0;
+
+    INSERT INTO scorer_task_stats (
+      scorer, taskVersion, projectId, assigned, completed, updatedAt
+    )
+    SELECT
+      NEW.scorer,
+      NEW.taskVersion,
+      COALESCE(NEW.projectId, ''),
+      CASE WHEN NEW.status = 'assigned' THEN 1 ELSE 0 END,
+      CASE WHEN NEW.status = 'completed' THEN 1 ELSE 0 END,
+      NEW.updatedAt
+    WHERE NEW.scorer IS NOT NULL
+      AND TRIM(NEW.scorer) <> ''
+      AND NEW.status IN ('assigned', 'completed')
+    ON CONFLICT(scorer, taskVersion, projectId) DO UPDATE SET
+      assigned = scorer_task_stats.assigned + excluded.assigned,
+      completed = scorer_task_stats.completed + excluded.completed,
       updatedAt = excluded.updatedAt;
   END;
 `);
@@ -890,6 +992,49 @@ if (
     db.prepare(
       "INSERT INTO schema_meta (key, value, updatedAt) VALUES (?, ?, ?)",
     ).run(projectTaskStatsBackfillKey, "completed", migratedAt);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+const scorerTaskStatsBackfillKey = "scorer_task_stats_v1";
+if (
+  !db
+    .prepare("SELECT 1 FROM schema_meta WHERE key = ?")
+    .get(scorerTaskStatsBackfillKey)
+) {
+  const migratedAt = new Date().toISOString();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec("DELETE FROM scorer_task_stats");
+    db.exec(`
+      INSERT INTO scorer_task_stats (
+        scorer, taskVersion, projectId, assigned, completed, updatedAt
+      )
+      SELECT
+        scorer,
+        taskVersion,
+        COALESCE(projectId, ''),
+        SUM(CASE WHEN status = 'assigned' THEN 1 ELSE 0 END),
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END),
+        '${migratedAt}'
+      FROM rating_tasks
+      WHERE scorer IS NOT NULL
+        AND TRIM(scorer) <> ''
+        AND status IN ('assigned', 'completed')
+      GROUP BY scorer, taskVersion, COALESCE(projectId, '')
+      ON CONFLICT(scorer, taskVersion, projectId) DO UPDATE SET
+        assigned = excluded.assigned,
+        completed = excluded.completed,
+        updatedAt = excluded.updatedAt
+    `);
+    db.prepare(
+      "INSERT INTO schema_meta (key, value, updatedAt) VALUES (?, ?, ?)",
+    ).run(scorerTaskStatsBackfillKey, "completed", migratedAt);
     db.exec("COMMIT");
   } catch (error) {
     try {
