@@ -888,6 +888,13 @@ function httpError(status, message) {
   return error;
 }
 
+function isUniqueConstraintError(error) {
+  return (
+    error?.code === "23505" ||
+    String(error?.message || "").includes("UNIQUE constraint failed")
+  );
+}
+
 function archiveImportError(status, message, cause) {
   const error = httpError(status, message);
   error.isArchiveImportError = true;
@@ -1871,7 +1878,7 @@ async function importZipArchive(
         catalogMatched += result.catalogMatched ? 1 : 0;
         imported++;
       }
-      onProgress?.({
+      await onProgress?.({
         current: Math.min(start + imageImportConcurrency, imageEntries.length),
         total: imageEntries.length,
       });
@@ -2995,11 +3002,7 @@ async function createTeam(body = {}) {
   try {
     await insertTeamStmt.run({ id, name, createdAt: now, updatedAt: now });
   } catch (error) {
-    if (
-      String(error?.message || "").includes(
-        "UNIQUE constraint failed: teams.name",
-      )
-    ) {
+    if (isUniqueConstraintError(error)) {
       throw httpError(409, "团队已存在");
     }
     throw error;
@@ -3022,11 +3025,7 @@ async function updateTeam(id, body = {}) {
       updatedAt: nowIso(),
     });
   } catch (error) {
-    if (
-      String(error?.message || "").includes(
-        "UNIQUE constraint failed: teams.name",
-      )
-    ) {
+    if (isUniqueConstraintError(error)) {
       throw httpError(409, "团队已存在");
     }
     throw error;
@@ -3143,7 +3142,7 @@ async function createProject(body = {}) {
     await db.exec("COMMIT");
   } catch (error) {
     try { await db.exec("ROLLBACK"); } catch {}
-    if (String(error?.message || "").includes("UNIQUE constraint failed")) {
+    if (isUniqueConstraintError(error)) {
       throw httpError(409, "项目名称已存在");
     }
     throw error;
@@ -3180,7 +3179,7 @@ async function updateProject(id, body = {}) {
     await db.exec("COMMIT");
   } catch (error) {
     try { await db.exec("ROLLBACK"); } catch {}
-    if (String(error?.message || "").includes("UNIQUE constraint failed")) {
+    if (isUniqueConstraintError(error)) {
       throw httpError(409, "项目名称已存在");
     }
     throw error;
@@ -3435,27 +3434,31 @@ async function touchSessionSeenAt(tokenHash) {
 }
 
 async function requireAuth(req, _res, next) {
-  if (req.method === "OPTIONS") return next();
-  const token = cookieValue(req.headers.cookie, "image_rating_session");
-  if (!token) return next(httpError(401, "请先登录"));
+  try {
+    if (req.method === "OPTIONS") return next();
+    const token = cookieValue(req.headers.cookie, "image_rating_session");
+    if (!token) return next(httpError(401, "请先登录"));
 
-  const tokenHash = sessionTokenHash(token);
-  const user = await selectSessionUserStmt.get(tokenHash, nowIso());
-  if (!user) {
-    await deleteSessionStmt.run(tokenHash);
-    sessionSeenWriteAt.delete(tokenHash);
-    return next(httpError(401, "登录已过期，请重新登录"));
-  }
-  const availabilityError = await scorerAvailabilityError(user);
-  if (availabilityError) {
-    await deleteSessionStmt.run(tokenHash);
-    sessionSeenWriteAt.delete(tokenHash);
-    return next(availabilityError);
-  }
+    const tokenHash = sessionTokenHash(token);
+    const user = await selectSessionUserStmt.get(tokenHash, nowIso());
+    if (!user) {
+      await deleteSessionStmt.run(tokenHash);
+      sessionSeenWriteAt.delete(tokenHash);
+      return next(httpError(401, "登录已过期，请重新登录"));
+    }
+    const availabilityError = await scorerAvailabilityError(user);
+    if (availabilityError) {
+      await deleteSessionStmt.run(tokenHash);
+      sessionSeenWriteAt.delete(tokenHash);
+      return next(availabilityError);
+    }
 
-  await touchSessionSeenAt(tokenHash);
-  req.auth = await userDto(user);
-  return next();
+    await touchSessionSeenAt(tokenHash);
+    req.auth = await userDto(user);
+    return next();
+  } catch (error) {
+    return next(error);
+  }
 }
 
 function requireAdmin(req, _res, next) {
@@ -3672,11 +3675,7 @@ async function createScorerUser(body = {}) {
     try {
       await db.exec("ROLLBACK");
     } catch {}
-    if (
-      String(error?.message || "").includes(
-        "UNIQUE constraint failed: users.username",
-      )
-    ) {
+    if (isUniqueConstraintError(error)) {
       throw httpError(409, "账号已存在");
     }
     throw error;
@@ -3734,11 +3733,7 @@ async function createScorerUsers(body = {}) {
     try {
       await db.exec("ROLLBACK");
     } catch {}
-    if (
-      String(error?.message || "").includes(
-        "UNIQUE constraint failed: users.username",
-      )
-    ) {
+    if (isUniqueConstraintError(error)) {
       throw httpError(409, "账号已存在，请刷新后重试");
     }
     throw error;
@@ -5480,7 +5475,9 @@ async function getTaskReassignmentOptions(subjectId) {
   const stats = await getProjectTaskStats(subjectId);
 
   return {
-    users: (await selectAvailableSubjectScorersStmt.all(subjectId)).map(userDto),
+    users: await Promise.all(
+      (await selectAvailableSubjectScorersStmt.all(subjectId)).map(userDto),
+    ),
     availableTaskCount: stats.pending,
     sourceScorers: (await selectSubjectAssignedScorerCountsStmt
       .all(subjectId, taskVersion))
@@ -5594,7 +5591,7 @@ async function reassignSubjectTasks(subjectId, body = {}) {
       );
     }
 
-    selectedTasks = sourceScorers.flatMap(async scorer => {
+    selectedTasks = (await Promise.all(sourceScorers.map(async scorer => {
       const candidates = await selectReassignableTaskIdsByScorerStmt.all(subjectId, taskVersion, scorer, taskCount);
       if (taskCount > candidates.length) {
         throw httpError(
@@ -5603,7 +5600,7 @@ async function reassignSubjectTasks(subjectId, body = {}) {
         );
       }
       return candidates;
-    });
+    }))).flat();
   }
 
   if (selectedTasks.length < assignees.names.length) {

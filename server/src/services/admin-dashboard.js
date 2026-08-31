@@ -106,8 +106,8 @@ export function createAdminDashboardService({
     return ids;
   }
 
-  function parseDashboardTeamIds(query = {}) {
-    return normalizeTeamIds(parseQueryList(query.teamIds ?? query.teamId));
+  async function parseDashboardTeamIds(query = {}) {
+    return await normalizeTeamIds(parseQueryList(query.teamIds ?? query.teamId));
   }
 
   async function parseDashboardScorerIds(query = {}) {
@@ -130,8 +130,8 @@ export function createAdminDashboardService({
     }));
   }
 
-  function parseTeamSummaryExportIds(query = {}) {
-    const teamIds = parseDashboardTeamIds(query);
+  async function parseTeamSummaryExportIds(query = {}) {
+    const teamIds = await parseDashboardTeamIds(query);
     if (!teamIds.length) throw httpError(400, "请选择需要导出的团队");
     return teamIds;
   }
@@ -861,7 +861,7 @@ export function createAdminDashboardService({
     let written = 0;
     for (let offset = 0; offset < taskCount; offset += batchSize) {
       const rows = await listCompletedTaskRows(filters, batchSize, offset);
-      const tasks = hydrateTaskRows(rows);
+      const tasks = await hydrateTaskRows(rows);
       for (const task of tasks) {
         await writeResponseChunk(
           res,
@@ -899,7 +899,7 @@ export function createAdminDashboardService({
     let written = 0;
     for (let offset = 0; offset < taskCount; offset += batchSize) {
       const rows = await listCompletedTaskRows(filters, batchSize, offset);
-      const tasks = hydrateTaskRows(rows);
+      const tasks = await hydrateTaskRows(rows);
       for (const task of tasks) {
         await writeResponseChunk(
           res,
@@ -912,7 +912,7 @@ export function createAdminDashboardService({
   }
 
   async function exportTeamTaskSummary(req, res) {
-    const teamIds = parseTeamSummaryExportIds(req.query);
+    const teamIds = await parseTeamSummaryExportIds(req.query);
     const rows = await listTeamTaskSummaryRows(teamIds);
     const teams = await listTeamSummaryExportTeams(teamIds, rows);
     const distinctScorers = new Set(rows.map((row) => row.scorer));

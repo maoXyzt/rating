@@ -157,7 +157,7 @@ export function createAdminScoringService({
   const summaryCache = new Map();
   const summaryCacheTtlMs = 15 * 1000;
 
-  function buildSummaryFilter(query = {}) {
+  async function buildSummaryFilter(query = {}) {
     const clauses = [
       "rating_tasks.taskVersion = ?",
       "rating_tasks.status = 'completed'",
@@ -166,7 +166,7 @@ export function createAdminScoringService({
     ];
     const params = [taskVersion];
     const scorer = parseOptionalScorer(query.scorer, httpError);
-    const projectId = query.projectId ? parseProjectId(query.projectId) : null;
+    const projectId = query.projectId ? await parseProjectId(query.projectId) : null;
     if (scorer) {
       clauses.push("rating_tasks.scorer = ?");
       params.push(scorer);
@@ -178,8 +178,8 @@ export function createAdminScoringService({
     return { where: `WHERE ${clauses.join(" AND ")}`, params };
   }
 
-  function buildTaskFilter(query = {}) {
-    const filter = buildSummaryFilter(query);
+  async function buildTaskFilter(query = {}) {
+    const filter = await buildSummaryFilter(query);
     const clauses = [filter.where.replace(/^WHERE\s+/i, "")];
     const params = [...filter.params];
     const submissionMode = parseOptionalSubmissionMode(query.submissionMode, httpError);
@@ -205,7 +205,7 @@ export function createAdminScoringService({
 
   async function calculateScoringSummary(query = {}) {
     const { page, pageSize } = parseTaskPagination(query);
-    const filter = buildTaskFilter(query);
+    const filter = await buildTaskFilter(query);
     const totalScorerCount = Number(
       (await db
         .prepare(
@@ -314,7 +314,7 @@ export function createAdminScoringService({
 
   async function listScoringTaskRecords(query = {}) {
     const { page, pageSize } = parseTaskPagination(query);
-    const filter = buildTaskFilter(query);
+    const filter = await buildTaskFilter(query);
     const cursor = parseTaskCursor(query.cursor, httpError);
     const total = includeTaskTotal(query)
       ? Number(
