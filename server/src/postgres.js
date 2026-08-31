@@ -42,6 +42,10 @@ const pool = new Pool({
 const transactionStorage = new AsyncLocalStorage();
 const camelNames = new Map();
 
+export function runWithDatabaseContext(callback) {
+  return transactionStorage.run({ client: null }, callback);
+}
+
 for (const file of ["app.js", "services/admin-dashboard.js", "services/admin-scoring.js"]) {
   try {
     const source = await fs.readFile(new URL(`./${file}`, import.meta.url), "utf8");
