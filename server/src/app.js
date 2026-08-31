@@ -4834,6 +4834,11 @@ function buildScorerTaskFilter(query = {}) {
     clauses.push("(rating_tasks.taskType = ? OR rating_tasks.taskType LIKE ?)");
     params.push(taskType, `${taskType}:%`);
   }
+  const excludeTaskId = String(query.excludeTaskId || "").trim();
+  if (excludeTaskId) {
+    clauses.push("rating_tasks.id <> ?");
+    params.push(excludeTaskId);
+  }
   return { where: `WHERE ${clauses.join(" AND ")}`, params };
 }
 
@@ -4874,6 +4879,7 @@ function listAssignedTasks(query = {}) {
     cursor: query.cursor || null,
     status: query.status || null,
     criterion: query.criterion || null,
+    excludeTaskId: query.excludeTaskId || null,
     summaryOnly: query.summaryOnly || null,
     includeTotal: includeTaskTotal(query),
   });

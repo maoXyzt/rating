@@ -222,7 +222,7 @@ function handleTaskSaved(task: RatingTask, advancing = false) {
   }
 }
 
-async function getNextTask() {
+async function getNextTask(savedTask?: RatingTask) {
   const scorer = currentUser.value?.username;
   if (!scorer) throw new Error('未获取到当前打分人');
 
@@ -233,10 +233,16 @@ async function getNextTask() {
     status: 'assigned',
     page: 1,
     pageSize: 1,
-    summaryOnly: true
+    summaryOnly: true,
+    excludeTaskId: savedTask?.id || null
   });
 
   const nextTask = nextPage.tasks[0];
+  if (nextTask?.id === savedTask?.id) {
+    await loadTasks(taskPage.value, taskPageSize.value);
+    scheduleTaskStatsRefresh();
+    return null;
+  }
   if (!nextTask) {
     await loadTasks(taskPage.value, taskPageSize.value);
     scheduleTaskStatsRefresh();

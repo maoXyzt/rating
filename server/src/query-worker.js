@@ -345,6 +345,11 @@ function listAssignedTasks(query) {
     clauses.push("(rating_tasks.taskType = ? OR rating_tasks.taskType LIKE ?)");
     params.push(taskType, `${taskType}:%`);
   }
+  const excludeTaskId = String(query.excludeTaskId || "").trim();
+  if (excludeTaskId) {
+    clauses.push("rating_tasks.id <> ?");
+    params.push(excludeTaskId);
+  }
   const where = `WHERE ${clauses.join(" AND ")}`;
   const orderSql = criterionOrderSql("rating_tasks.taskType");
   const cursor = parseCursor(query.cursor);

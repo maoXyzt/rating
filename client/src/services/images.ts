@@ -514,6 +514,7 @@ export const imageApi = {
     status?: 'assigned' | 'completed' | null;
     criterion?: RatingTask['criterion'] | null;
     summaryOnly?: boolean;
+    excludeTaskId?: string | null;
   }) {
     const params = new URLSearchParams();
     params.set('scorer', query.scorer);
@@ -524,6 +525,7 @@ export const imageApi = {
     if (query.status) params.set('status', query.status);
     if (query.criterion) params.set('criterion', query.criterion);
     if (query.summaryOnly) params.set('summaryOnly', '1');
+    if (query.excludeTaskId) params.set('excludeTaskId', query.excludeTaskId);
     return requestJsonWithRetry<TaskListPage<ScorerTaskListItem>>(`/api/tasks/assigned?${params}`);
   },
   assignedTaskDetail(taskId: string) {
