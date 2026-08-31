@@ -3,6 +3,8 @@
 ## 一键启动
 
 ```bash
+cp -n .env.example .env
+# 编辑 .env，将 POSTGRES_PASSWORD 改成实际密码
 docker compose up --build -d
 ```
 

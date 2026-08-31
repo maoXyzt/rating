@@ -51,6 +51,9 @@ cd image-rating-platform
 首次启动（当前 Compose 会同时拉起 PostgreSQL；API 运行时切换完成后再执行生产迁移）：
 
 ```bash
+cp -n .env.example .env
+# 编辑 .env，将 POSTGRES_PASSWORD 改成实际密码
+
 # 默认使用 8080；如果外部访问端口是 8001：
 WEB_PORT=8001 docker compose up --build -d
 ```
@@ -123,7 +126,7 @@ Compose 会根据项目目录名给 volume 加前缀，例如 `image-rating-plat
 
 ```bash
 mkdir -p backups
-docker compose exec -T postgres pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" > backups/postgres_$(date +%Y%m%d_%H%M%S).sql
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' > backups/postgres_$(date +%Y%m%d_%H%M%S).sql
 docker run --rm -v image-rating-platform_image_uploads:/data -v "$PWD/backups:/backup" alpine tar czf /backup/image_uploads_$(date +%Y%m%d_%H%M%S).tgz -C /data .
 ```
 
@@ -137,10 +140,16 @@ docker run --rm -v image-rating-platform_image_uploads:/data -v "$PWD/backups:/b
 docker compose down
 ```
 
+启动 PostgreSQL（恢复前必须先启动数据库容器）：
+
+```bash
+docker compose up -d postgres
+```
+
 恢复 PostgreSQL：
 
 ```bash
-cat backups/你的_postgres_备份文件.sql | docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+cat backups/你的_postgres_备份文件.sql | docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 
 恢复图片 volume：
