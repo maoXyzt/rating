@@ -235,6 +235,8 @@ UPLOAD_DIR: /app/uploads
 
 `POSTGRES_PASSWORD` 必须通过 `.env` 或部署环境设置；不要提交到仓库。
 
+`RATING_DATA_DIR` 用于配置宿主机数据根目录，默认值为 `/data/sunwenxiu/rating`；修改 `.env` 后重新执行 `docker compose up` 即可生效。需要在宿主机执行备份或恢复命令时，先按第 5 节加载该变量。
+
 可选的安全和上传限制配置：
 
 ```yaml
