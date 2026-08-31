@@ -6126,7 +6126,7 @@ app.use(
   "/files",
   ensureFileAccess,
   express.static(uploadDir, {
-    maxAge: "1y",
+    maxAge: "7d",
     immutable: true,
     index: false,
   }),
